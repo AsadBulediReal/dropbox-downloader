@@ -19,7 +19,7 @@ from dropbox.files import FileMetadata, FolderMetadata, SharedLink
 from dropbox.exceptions import ApiError, AuthError
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QSettings, QTimer
-from PySide6.QtGui import QFont, QTextCursor, QCursor
+from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -51,7 +51,7 @@ QMainWindow {
     color: #f1f5f9;
 }
 QWidget {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Helvetica Neue", Arial, sans-serif;
     color: #e2e8f0;
 }
 QDialog {
@@ -133,6 +133,23 @@ QInputDialog QPushButton:default {
     border: 1px solid #38bdf8;
     color: #ffffff;
 }
+QFrame.header-card, QFrame[class="header-card"] {
+    background-color: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+}
+QFrame.login-banner, QFrame[class="login-banner"] {
+    background-color: #0c182c;
+    border: 1px solid #1e3a66;
+    border-left: 5px solid #38bdf8;
+    border-radius: 10px;
+    padding: 12px 16px;
+}
+QFrame.account-pill, QFrame[class="account-pill"] {
+    background-color: #0c1424;
+    border: 1px solid #1e2d4a;
+    border-radius: 8px;
+}
 QFrame.card, QFrame[class="card"] {
     background-color: #111a2e;
     border: 1px solid #1e2d4a;
@@ -196,6 +213,11 @@ QPushButton:hover {
     border-color: #475569;
     color: #ffffff;
 }
+QPushButton:checked {
+    background-color: #0c4a6e;
+    border-color: #0284c7;
+    color: #38bdf8;
+}
 QPushButton:pressed {
     background-color: #162033;
 }
@@ -216,6 +238,11 @@ QPushButton.btn-primary:hover, QPushButton[class="btn-primary"]:hover {
 QPushButton.btn-primary:pressed, QPushButton[class="btn-primary"]:pressed {
     background-color: #075985;
 }
+QPushButton.btn-primary:disabled, QPushButton[class="btn-primary"]:disabled {
+    background-color: #0b1c2e;
+    border: 1px solid #162a42;
+    color: #3b5270;
+}
 QPushButton.btn-secondary, QPushButton[class="btn-secondary"] {
     background-color: #1e293b;
     border: 1px solid #334155;
@@ -228,6 +255,11 @@ QPushButton.btn-secondary:hover, QPushButton[class="btn-secondary"]:hover {
 }
 QPushButton.btn-secondary:pressed, QPushButton[class="btn-secondary"]:pressed {
     background-color: #162033;
+}
+QPushButton.btn-secondary:disabled, QPushButton[class="btn-secondary"]:disabled {
+    background-color: #0d131f;
+    border: 1px solid #192436;
+    color: #475569;
 }
 QPushButton.btn-start, QPushButton[class="btn-start"] {
     background-color: #059669;
@@ -245,6 +277,11 @@ QPushButton.btn-start:hover, QPushButton[class="btn-start"]:hover {
 QPushButton.btn-start:pressed, QPushButton[class="btn-start"]:pressed {
     background-color: #065f46;
 }
+QPushButton.btn-start:disabled, QPushButton[class="btn-start"]:disabled {
+    background-color: #072218;
+    border: 1px solid #0f3d2c;
+    color: #2e5948;
+}
 QPushButton.btn-stop, QPushButton[class="btn-stop"] {
     background-color: #dc2626;
     border: 1px solid #ef4444;
@@ -260,6 +297,11 @@ QPushButton.btn-stop:hover, QPushButton[class="btn-stop"]:hover {
 }
 QPushButton.btn-stop:pressed, QPushButton[class="btn-stop"]:pressed {
     background-color: #991b1b;
+}
+QPushButton.btn-stop:disabled, QPushButton[class="btn-stop"]:disabled {
+    background-color: #220d0f;
+    border: 1px solid #3b171c;
+    color: #592d33;
 }
 QProgressBar {
     background-color: #090e1a;
@@ -286,6 +328,11 @@ QTreeWidget {
     color: #f1f5f9;
     font-size: 12px;
     padding: 4px;
+}
+QTreeWidget:disabled {
+    background-color: #070b14;
+    color: #475569;
+    border: 1px solid #141c2b;
 }
 QTreeWidget::item {
     padding: 5px 4px;
@@ -321,6 +368,9 @@ QCheckBox {
     font-size: 12px;
     spacing: 7px;
 }
+QCheckBox:disabled {
+    color: #475569;
+}
 QCheckBox::indicator {
     width: 16px;
     height: 16px;
@@ -334,6 +384,10 @@ QCheckBox::indicator:hover {
 QCheckBox::indicator:checked {
     background-color: #0284c7;
     border-color: #38bdf8;
+}
+QCheckBox::indicator:disabled {
+    background-color: #080d18;
+    border-color: #1a2538;
 }
 QScrollBar:vertical {
     border: none;
@@ -561,6 +615,101 @@ def create_dropbox_client(
     if a_token:
         return dropbox.Dropbox(oauth2_access_token=a_token)
     raise ValueError("Not authenticated. Please sign in with your Dropbox account first.")
+
+
+# ==============================================================================
+# Auth Worker (Authenticates via OAuth PKCE in background thread)
+# ==============================================================================
+class AuthWorker(QObject):
+    finished = Signal(str, str, str, str)  # access_token, refresh_token, user_name, user_email
+    failed = Signal(str)
+    status = Signal(str)
+    progress = Signal(int)
+
+    def __init__(self, flow: Any, code: str, app_key: str):
+        super().__init__()
+        self.flow = flow
+        self.code = code.strip()
+        self.app_key = app_key.strip()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    @Slot()
+    def run(self):
+        try:
+            self.status.emit("Exchanging authorization code with Dropbox...")
+            self.progress.emit(25)
+            oauth_res: Any = self.flow.finish(self.code)
+            if self._is_cancelled:
+                return
+
+            access_token = getattr(oauth_res, "access_token", None) or ""
+            refresh_token = getattr(oauth_res, "refresh_token", None) or ""
+
+            self.status.emit("Connecting to Dropbox API...")
+            self.progress.emit(55)
+            dbx = create_dropbox_client(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                app_key=self.app_key,
+            )
+            if self._is_cancelled:
+                return
+
+            self.status.emit("Retrieving account profile...")
+            self.progress.emit(80)
+            account: Any = dbx.users_get_current_account()
+            if self._is_cancelled:
+                return
+
+            user_name = (
+                account.name.display_name
+                if account and hasattr(account, "name") and account.name
+                else "Dropbox User"
+            )
+            user_email = account.email if account and hasattr(account, "email") else ""
+
+            self.status.emit("Completing sign in...")
+            self.progress.emit(95)
+            self.finished.emit(access_token, refresh_token, user_name, user_email)
+        except Exception as exc:
+            if not self._is_cancelled:
+                self.failed.emit(str(exc))
+
+
+class SessionVerifyWorker(QObject):
+    finished = Signal(str, str)  # user_name, user_email
+    expired = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, access_token: str, refresh_token: str, app_key: str):
+        super().__init__()
+        self.access_token = access_token.strip()
+        self.refresh_token = refresh_token.strip()
+        self.app_key = app_key.strip()
+
+    @Slot()
+    def run(self):
+        try:
+            dbx = create_dropbox_client(
+                access_token=self.access_token,
+                refresh_token=self.refresh_token,
+                app_key=self.app_key,
+            )
+            account: Any = dbx.users_get_current_account()
+            user_name = (
+                account.name.display_name
+                if account and hasattr(account, "name") and account.name
+                else "Dropbox User"
+            )
+            user_email = account.email if account and hasattr(account, "email") else ""
+            self.finished.emit(user_name, user_email)
+        except AuthError as exc:
+            self.expired.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 # ==============================================================================
@@ -1276,6 +1425,212 @@ class ModernInputDialog(QDialog):
         return (dlg.input_field.text().strip(), result == QDialog.DialogCode.Accepted)
 
 
+class ModernLoadingDialog(QDialog):
+    """A sleek, modern dark-themed modal loader dialog with an animated progress bar and spinner."""
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        title: str = "Signing In",
+        heading: str = "Signing into Dropbox...",
+        status: str = "Authenticating with Dropbox...",
+        cancelable: bool = True,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self.setMaximumWidth(540)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0c1322;
+                border: 1px solid #1f2e45;
+                border-radius: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 22)
+        layout.setSpacing(18)
+
+        # Header with animated badge icon and heading
+        header_row = QHBoxLayout()
+        header_row.setSpacing(16)
+        header_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        self.icon_badge = QLabel("⠋")
+        self.icon_badge.setFixedSize(48, 48)
+        self.icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_badge.setStyleSheet(
+            "background-color: #0c2646; color: #38bdf8; border: 1.5px solid #0284c7; "
+            "border-radius: 24px; font-size: 22px; font-weight: bold;"
+        )
+        header_row.addWidget(self.icon_badge)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+
+        self.heading_label = QLabel(heading)
+        self.heading_label.setStyleSheet("color: #f8fafc; font-size: 15px; font-weight: 700;")
+        text_col.addWidget(self.heading_label)
+
+        self.status_label = QLabel(status)
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.4;")
+        text_col.addWidget(self.status_label)
+
+        header_row.addLayout(text_col, stretch=1)
+        layout.addLayout(header_row)
+
+        # Animated gradient progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(10)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #090e1a;
+                border: 1px solid #1e293b;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:0.5 #38bdf8, stop:1 #6366f1);
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+
+        # Cancel button row
+        if cancelable:
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            self.btn_cancel = QPushButton("Cancel")
+            self.btn_cancel.setProperty("class", "btn-secondary")
+            self.btn_cancel.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.btn_cancel.setFixedHeight(32)
+            self.btn_cancel.setMinimumWidth(88)
+            self.btn_cancel.clicked.connect(self.on_cancel_clicked)
+            btn_row.addWidget(self.btn_cancel)
+            layout.addLayout(btn_row)
+
+        # Spinner & progress animation
+        self.auth_success: bool = False
+        self.auth_data: dict[str, str] = {}
+        self.auth_error: str = ""
+        self.is_cancelled: bool = False
+
+        self._current_val: float = 10.0
+        self._target_val: float = 20.0
+        self._spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._frame_idx = 0
+        self._tick_count = 0
+
+        self.anim_timer = QTimer(self)
+        self.anim_timer.setInterval(25)
+        self.anim_timer.timeout.connect(self._on_anim_tick)
+        self.anim_timer.start()
+
+    @Slot()
+    def _on_anim_tick(self):
+        self._tick_count += 1
+
+        # Smooth forward-only advance towards target, never backwards
+        if self._current_val < self._target_val:
+            step = max(0.5, (self._target_val - self._current_val) * 0.15)
+            self._current_val = min(self._current_val + step, self._target_val)
+        elif self._current_val < 94.0:
+            # Gentle forward crawl while awaiting network so the loader feels alive
+            self._current_val += 0.08
+            self._target_val = max(self._target_val, self._current_val)
+
+        self.progress_bar.setValue(int(self._current_val))
+
+        # Advance spinner frame every 4 ticks (~100ms)
+        if self._tick_count % 4 == 0:
+            self._frame_idx = (self._frame_idx + 1) % len(self._spinner_frames)
+            self.icon_badge.setText(self._spinner_frames[self._frame_idx])
+
+    @Slot(int)
+    def set_progress(self, val: int):
+        target = float(max(0, min(val, 100)))
+        if target > self._target_val:
+            self._target_val = target
+
+    @Slot(str)
+    def set_heading(self, text: str):
+        self.heading_label.setText(text)
+
+    @Slot(str)
+    def set_status(self, text: str):
+        self.status_label.setText(text)
+        lower = text.lower()
+        if "authoriz" in lower or "exchanging" in lower:
+            self.set_progress(25)
+        elif "connect" in lower or "api" in lower:
+            self.set_progress(55)
+        elif "profile" in lower or "account" in lower:
+            self.set_progress(80)
+        elif "complet" in lower or "finish" in lower:
+            self.set_progress(95)
+
+    @Slot(str, str, str, str)
+    def on_auth_finished(self, access_token: str, refresh_token: str, user_name: str, user_email: str):
+        self.auth_success = True
+        self.auth_data = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user_name": user_name,
+            "user_email": user_email,
+        }
+        self._current_val = 100.0
+        self._target_val = 100.0
+        self.progress_bar.setValue(100)
+        self.icon_badge.setText("✓")
+        self.icon_badge.setStyleSheet(
+            "background-color: #064e3b; color: #34d399; border: 1.5px solid #059669; "
+            "border-radius: 24px; font-size: 22px; font-weight: bold;"
+        )
+        self.heading_label.setText("Signed in successfully!")
+        self.status_label.setText(f"Connected as {user_name}")
+        if hasattr(self, "btn_cancel"):
+            self.btn_cancel.setEnabled(False)
+        if self.anim_timer.isActive():
+            self.anim_timer.stop()
+        QTimer.singleShot(350, self.accept)
+
+    @Slot(str)
+    def on_auth_failed(self, err_msg: str):
+        self.auth_error = err_msg
+        if self.anim_timer.isActive():
+            self.anim_timer.stop()
+        self.reject()
+
+    @Slot()
+    def on_cancel_clicked(self):
+        self.is_cancelled = True
+        if self.anim_timer.isActive():
+            self.anim_timer.stop()
+        self.cancelled.emit()
+        self.reject()
+
+    def closeEvent(self, event):
+        if self.anim_timer.isActive():
+            self.anim_timer.stop()
+        super().closeEvent(event)
+
+    def accept(self):
+        if self.anim_timer.isActive():
+            self.anim_timer.stop()
+        super().accept()
+
+    def reject(self):
+        if self.anim_timer.isActive():
+            self.anim_timer.stop()
+        super().reject()
+
+
 # ==============================================================================
 # Main GUI Window
 # ==============================================================================
@@ -1293,6 +1648,10 @@ class MainWindow(QMainWindow):
         self.worker: DownloadWorker | None = None
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
+        self.auth_thread: QThread | None = None
+        self.auth_worker: AuthWorker | None = None
+        self.verify_thread: QThread | None = None
+        self.verify_worker: SessionVerifyWorker | None = None
         self._updating_tree = False
         self._tree_items_data: list[Any] = []
 
@@ -1300,6 +1659,7 @@ class MainWindow(QMainWindow):
         self.current_refresh_token: str = ""
         self.current_user_name: str = ""
         self.current_user_email: str = ""
+        self.link_password: str = ""
 
         self.auto_scan_timer = QTimer(self)
         self.auto_scan_timer.setSingleShot(True)
@@ -1348,80 +1708,68 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(18, 18, 18, 18)
-        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
 
-        # Header Section
-        header_layout = QHBoxLayout()
+        # Header Section (Brand + Account + Status)
+        header_card = QFrame()
+        header_card.setProperty("class", "header-card")
+        header_layout = QHBoxLayout(header_card)
+        header_layout.setContentsMargins(14, 10, 14, 10)
+        header_layout.setSpacing(10)
+
         header_text_layout = QVBoxLayout()
+        header_text_layout.setSpacing(2)
 
-        title_label = QLabel("Dropbox Recursive Downloader")
-        title_font = QFont()
-        title_font.setPointSize(16)
-        title_font.setBold(True)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        brand_icon = QLabel("📦")
+        brand_icon.setStyleSheet("font-size: 20px;")
+        title_label = QLabel("Dropbox Recursive Downloader Pro")
+        title_font = QFont("Segoe UI", 15, QFont.Weight.Bold)
         title_label.setFont(title_font)
-        title_label.setStyleSheet("color: #38bdf8;")
+        title_label.setStyleSheet("color: #38bdf8; font-weight: 700;")
+        title_row.addWidget(brand_icon)
+        title_row.addWidget(title_label)
+        title_row.addStretch()
 
-        subtitle_label = QLabel("Selectively download files and entire folder hierarchies directly from Dropbox shared links")
-        subtitle_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        subtitle_label = QLabel("Selectively download files and folder hierarchies directly from Dropbox shared links")
+        subtitle_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        subtitle_label.setWordWrap(True)
 
-        header_text_layout.addWidget(title_label)
+        header_text_layout.addLayout(title_row)
         header_text_layout.addWidget(subtitle_label)
         header_layout.addLayout(header_text_layout)
 
         header_layout.addStretch()
 
-        self.status_badge = QLabel()
-        self.set_status_badge("● Ready", "ready")
-        header_layout.addWidget(self.status_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
-        main_layout.addLayout(header_layout)
+        # Account Pill
+        account_pill = QFrame()
+        account_pill.setProperty("class", "account-pill")
+        account_pill_layout = QHBoxLayout(account_pill)
+        account_pill_layout.setContentsMargins(10, 5, 10, 5)
+        account_pill_layout.setSpacing(8)
 
-        # 1. Dropbox Account Card
-        auth_card = QFrame()
-        auth_card.setProperty("class", "card")
-        auth_layout = QVBoxLayout(auth_card)
-        auth_layout.setContentsMargins(16, 14, 16, 14)
-        auth_layout.setSpacing(12)
-
-        auth_header_row = QHBoxLayout()
-        auth_title = QLabel("1. Dropbox Account")
-        auth_title.setProperty("class", "section-title")
-        auth_header_row.addWidget(auth_title)
-        auth_header_row.addStretch()
+        self.account_info_layout = QVBoxLayout()
+        self.account_info_layout.setSpacing(1)
+        self.account_name_label = QLabel("No Dropbox account connected")
+        self.account_name_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #f8fafc;")
+        self.account_sub_label = QLabel("Sign in to your Dropbox account")
+        self.account_sub_label.setStyleSheet("font-size: 10px; color: #94a3b8;")
+        self.account_info_layout.addWidget(self.account_name_label)
+        self.account_info_layout.addWidget(self.account_sub_label)
+        account_pill_layout.addLayout(self.account_info_layout)
 
         self.auth_badge = QLabel()
         self.set_auth_badge("○ Not Logged In", "neutral")
-        auth_header_row.addWidget(self.auth_badge)
-        auth_layout.addLayout(auth_header_row)
+        account_pill_layout.addWidget(self.auth_badge)
 
-        account_box = QFrame()
-        account_box.setStyleSheet(
-            "background-color: #0c1424; border: 1px solid #1a263c; border-radius: 8px; padding: 10px 14px;"
-        )
-        account_box_layout = QHBoxLayout(account_box)
-        account_box_layout.setContentsMargins(0, 0, 0, 0)
-        account_box_layout.setSpacing(12)
-
-        self.account_info_layout = QVBoxLayout()
-        self.account_info_layout.setSpacing(2)
-
-        self.account_name_label = QLabel("No Dropbox account connected")
-        self.account_name_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #f8fafc;")
-
-        self.account_sub_label = QLabel("Sign in to your Dropbox account to inspect and download shared links.")
-        self.account_sub_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
-
-        self.account_info_layout.addWidget(self.account_name_label)
-        self.account_info_layout.addWidget(self.account_sub_label)
-        account_box_layout.addLayout(self.account_info_layout)
-        account_box_layout.addStretch()
-
-        self.btn_oauth_login = QPushButton("🌐  Log In with Dropbox")
+        self.btn_oauth_login = QPushButton("🌐  Log In")
         self.btn_oauth_login.setProperty("class", "btn-primary")
         self.btn_oauth_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_oauth_login.setToolTip("Sign into your Dropbox account via browser (PKCE OAuth)")
         self.btn_oauth_login.clicked.connect(self.login_with_dropbox)
-        account_box_layout.addWidget(self.btn_oauth_login)
+        account_pill_layout.addWidget(self.btn_oauth_login)
 
         self.btn_logout = QPushButton("Sign Out")
         self.btn_logout.setProperty("class", "btn-secondary")
@@ -1429,37 +1777,57 @@ class MainWindow(QMainWindow):
         self.btn_logout.setToolTip("Sign out of current Dropbox account")
         self.btn_logout.clicked.connect(self.logout_dropbox)
         self.btn_logout.setVisible(False)
-        account_box_layout.addWidget(self.btn_logout)
+        account_pill_layout.addWidget(self.btn_logout)
 
-        auth_layout.addWidget(account_box)
+        header_layout.addWidget(account_pill)
 
-        pwd_label = QLabel("Folder Link Password (Only if folder is password-protected):")
-        pwd_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1; margin-top: 4px;")
-        auth_layout.addWidget(pwd_label)
+        self.status_badge = QLabel()
+        self.set_status_badge("● Ready", "ready")
+        header_layout.addWidget(self.status_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        pwd_row = QHBoxLayout()
-        self.link_password_input = QLineEdit()
-        self.link_password_input.setPlaceholderText("Enter folder link password (leave blank if public)")
-        self.link_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        main_layout.addWidget(header_card)
 
-        self.btn_toggle_pwd = QPushButton("Show")
-        self.btn_toggle_pwd.setFixedWidth(60)
-        self.btn_toggle_pwd.clicked.connect(self.toggle_pwd_visibility)
+        # Authentication Required Banner (shown when user is not logged in)
+        self.login_banner = QFrame()
+        self.login_banner.setProperty("class", "login-banner")
+        banner_layout = QHBoxLayout(self.login_banner)
+        banner_layout.setContentsMargins(14, 10, 14, 10)
+        banner_layout.setSpacing(12)
 
-        pwd_row.addWidget(self.link_password_input)
-        pwd_row.addWidget(self.btn_toggle_pwd)
-        auth_layout.addLayout(pwd_row)
+        banner_icon = QLabel("🔒")
+        banner_icon.setStyleSheet("font-size: 22px; background-color: transparent;")
+        banner_layout.addWidget(banner_icon)
 
-        main_layout.addWidget(auth_card)
+        banner_text_layout = QVBoxLayout()
+        banner_text_layout.setSpacing(2)
+        banner_title = QLabel("Dropbox Sign-In Required")
+        banner_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #f8fafc; background-color: transparent;")
+        banner_desc = QLabel(
+            "Features are locked. Please sign in to your Dropbox account to enable folder scanning and downloads."
+        )
+        banner_desc.setStyleSheet("font-size: 11px; color: #94a3b8; background-color: transparent;")
+        banner_text_layout.addWidget(banner_title)
+        banner_text_layout.addWidget(banner_desc)
+        banner_layout.addLayout(banner_text_layout)
+        banner_layout.addStretch()
 
-        # 2. Source & Local Destination Card
-        target_card = QFrame()
-        target_card.setProperty("class", "card")
-        target_layout = QVBoxLayout(target_card)
-        target_layout.setContentsMargins(14, 12, 14, 12)
+        self.btn_banner_login = QPushButton("🌐  Log In to Dropbox")
+        self.btn_banner_login.setProperty("class", "btn-primary")
+        self.btn_banner_login.setFixedHeight(34)
+        self.btn_banner_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_banner_login.clicked.connect(self.login_with_dropbox)
+        banner_layout.addWidget(self.btn_banner_login)
+
+        main_layout.addWidget(self.login_banner)
+
+        # 1. Source & Local Destination Card
+        self.target_card = QFrame()
+        self.target_card.setProperty("class", "card")
+        target_layout = QVBoxLayout(self.target_card)
+        target_layout.setContentsMargins(16, 14, 16, 14)
         target_layout.setSpacing(10)
 
-        target_title = QLabel("2. Source & Local Destination")
+        target_title = QLabel("1. Source & Local Destination")
         target_title.setProperty("class", "section-title")
         target_layout.addWidget(target_title)
 
@@ -1468,23 +1836,27 @@ class MainWindow(QMainWindow):
         target_layout.addWidget(url_label)
 
         url_row = QHBoxLayout()
+        url_row.setSpacing(6)
+
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("https://www.dropbox.com/scl/fo/... or https://www.dropbox.com/sh/...")
         self.url_input.textChanged.connect(self.on_url_text_changed)
+        self.url_input.returnPressed.connect(self.start_scan)
 
-        self.btn_paste_url = QPushButton("Paste")
-        self.btn_paste_url.setFixedWidth(60)
+        self.btn_paste_url = QPushButton("📋 Paste")
+        self.btn_paste_url.setToolTip("Paste link from clipboard and scan")
         self.btn_paste_url.clicked.connect(self.paste_url)
 
-        self.btn_clear_url = QPushButton("Clear")
-        self.btn_clear_url.setFixedWidth(60)
+        self.btn_clear_url = QPushButton("✕ Clear")
+        self.btn_clear_url.setToolTip("Clear link and file list")
         self.btn_clear_url.clicked.connect(self.clear_url_and_tree)
 
         self.btn_scan_url = QPushButton("🔍 Load Folders")
         self.btn_scan_url.setProperty("class", "btn-primary")
+        self.btn_scan_url.setToolTip("Inspect shared folder and display files below (Enter)")
         self.btn_scan_url.clicked.connect(self.start_scan)
 
-        url_row.addWidget(self.url_input)
+        url_row.addWidget(self.url_input, 1)
         url_row.addWidget(self.btn_paste_url)
         url_row.addWidget(self.btn_clear_url)
         url_row.addWidget(self.btn_scan_url)
@@ -1495,20 +1867,21 @@ class MainWindow(QMainWindow):
         target_layout.addWidget(dest_label)
 
         dest_row = QHBoxLayout()
+        dest_row.setSpacing(6)
         self.destination_input = QLineEdit()
         self.destination_input.setText(str(Path.home() / "Downloads"))
 
-        btn_browse = QPushButton("Browse...")
-        btn_browse.setFixedWidth(85)
-        btn_browse.clicked.connect(self.browse_destination)
+        self.btn_browse = QPushButton("📁 Browse...")
+        self.btn_browse.setFixedWidth(105)
+        self.btn_browse.clicked.connect(self.browse_destination)
 
-        btn_open_folder = QPushButton("Open Folder")
-        btn_open_folder.setFixedWidth(95)
-        btn_open_folder.clicked.connect(self.open_destination_folder)
+        self.btn_open_folder = QPushButton("📂 Open Folder")
+        self.btn_open_folder.setFixedWidth(120)
+        self.btn_open_folder.clicked.connect(self.open_destination_folder)
 
-        dest_row.addWidget(self.destination_input)
-        dest_row.addWidget(btn_browse)
-        dest_row.addWidget(btn_open_folder)
+        dest_row.addWidget(self.destination_input, 1)
+        dest_row.addWidget(self.btn_browse)
+        dest_row.addWidget(self.btn_open_folder)
         target_layout.addLayout(dest_row)
 
         dest_opts_row = QHBoxLayout()
@@ -1518,39 +1891,39 @@ class MainWindow(QMainWindow):
         dest_opts_row.addStretch()
         target_layout.addLayout(dest_opts_row)
 
-        main_layout.addWidget(target_card)
+        main_layout.addWidget(self.target_card)
 
-        # 3. Tree Selection Card
-        tree_card = QFrame()
-        tree_card.setProperty("class", "card")
-        tree_layout = QVBoxLayout(tree_card)
-        tree_layout.setContentsMargins(14, 12, 14, 12)
+        # 2. Tree Selection Card
+        self.tree_card = QFrame()
+        self.tree_card.setProperty("class", "card")
+        tree_layout = QVBoxLayout(self.tree_card)
+        tree_layout.setContentsMargins(16, 14, 16, 14)
         tree_layout.setSpacing(8)
 
         tree_header = QHBoxLayout()
-        tree_title = QLabel("3. Folder & File Selection")
+        tree_title = QLabel("2. Folder & File Selection")
         tree_title.setProperty("class", "section-title")
         tree_header.addWidget(tree_title)
 
-        self.selection_summary_label = QLabel("(Paste link to inspect folders)")
+        self.selection_summary_label = QLabel("(Paste link above to inspect folders)")
         self.selection_summary_label.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 500;")
         tree_header.addWidget(self.selection_summary_label)
 
         tree_header.addStretch()
 
-        btn_select_all = QPushButton("Select All")
-        btn_select_all.clicked.connect(self.select_all_items)
-        btn_deselect_all = QPushButton("Deselect All")
-        btn_deselect_all.clicked.connect(self.deselect_all_items)
-        btn_expand_all = QPushButton("Expand All")
-        btn_expand_all.clicked.connect(lambda: self.tree_widget.expandAll())
-        btn_collapse_all = QPushButton("Collapse All")
-        btn_collapse_all.clicked.connect(lambda: self.tree_widget.collapseAll())
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.clicked.connect(self.select_all_items)
+        self.btn_deselect_all = QPushButton("Deselect All")
+        self.btn_deselect_all.clicked.connect(self.deselect_all_items)
+        self.btn_expand_all = QPushButton("Expand All")
+        self.btn_expand_all.clicked.connect(lambda: self.tree_widget.expandAll())
+        self.btn_collapse_all = QPushButton("Collapse All")
+        self.btn_collapse_all.clicked.connect(lambda: self.tree_widget.collapseAll())
 
-        tree_header.addWidget(btn_select_all)
-        tree_header.addWidget(btn_deselect_all)
-        tree_header.addWidget(btn_expand_all)
-        tree_header.addWidget(btn_collapse_all)
+        tree_header.addWidget(self.btn_select_all)
+        tree_header.addWidget(self.btn_deselect_all)
+        tree_header.addWidget(self.btn_expand_all)
+        tree_header.addWidget(self.btn_collapse_all)
         tree_layout.addLayout(tree_header)
 
         self.tree_widget = QTreeWidget()
@@ -1567,21 +1940,22 @@ class MainWindow(QMainWindow):
         self.tree_widget.itemCollapsed.connect(self.on_tree_item_collapsed)
         self.tree_widget.currentItemChanged.connect(self.on_tree_current_item_changed)
         tree_layout.addWidget(self.tree_widget)
+        self.show_empty_tree_placeholder()
 
         self.tree_hint = QLabel("💡 Tip: Click any folder to expand/collapse. Unchecked items will not be downloaded.")
         self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
         tree_layout.addWidget(self.tree_hint)
 
-        main_layout.addWidget(tree_card)
+        main_layout.addWidget(self.tree_card)
 
-        # 4. Progress & Status Card
-        progress_card = QFrame()
-        progress_card.setProperty("class", "card")
-        progress_layout = QVBoxLayout(progress_card)
-        progress_layout.setContentsMargins(14, 12, 14, 12)
+        # 3. Progress & Status Card
+        self.progress_card = QFrame()
+        self.progress_card.setProperty("class", "card")
+        progress_layout = QVBoxLayout(self.progress_card)
+        progress_layout.setContentsMargins(16, 14, 16, 14)
         progress_layout.setSpacing(10)
 
-        prog_title = QLabel("4. Download Status & Progress")
+        prog_title = QLabel("3. Download Status & Progress")
         prog_title.setProperty("class", "section-title")
         progress_layout.addWidget(prog_title)
 
@@ -1699,7 +2073,7 @@ class MainWindow(QMainWindow):
         actions_row.addWidget(self.stop_button, 1)
         progress_layout.addLayout(actions_row)
 
-        main_layout.addWidget(progress_card)
+        main_layout.addWidget(self.progress_card)
 
         # 5. Activity Log Card
         log_card = QFrame()
@@ -1724,8 +2098,12 @@ class MainWindow(QMainWindow):
         btn_copy.clicked.connect(self.copy_log)
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self.clear_log)
+        self.btn_toggle_log = QPushButton("Hide Log")
+        self.btn_toggle_log.clicked.connect(self.toggle_log_visibility)
+
         log_header.addWidget(btn_copy)
         log_header.addWidget(btn_clear)
+        log_header.addWidget(self.btn_toggle_log)
         log_layout.addLayout(log_header)
 
         self.log_box = QPlainTextEdit()
@@ -1750,28 +2128,105 @@ class MainWindow(QMainWindow):
         return bool(self.current_refresh_token or self.current_access_token)
 
     def update_account_ui(self):
-        if self.is_logged_in():
+        logged_in = self.is_logged_in()
+        if logged_in:
             display_name = self.current_user_name or "Connected User"
             email = self.current_user_email or "OAuth Account"
             self.account_name_label.setText(f"👤 {display_name}")
-            self.account_sub_label.setText(f"Email: {email} • Connected via Dropbox OAuth (PKCE)")
-            self.account_sub_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            self.account_sub_label.setText(email)
+            self.account_sub_label.setStyleSheet("font-size: 10px; color: #94a3b8;")
             self.set_auth_badge("● Connected", "connected")
-            self.btn_oauth_login.setText("🔄  Switch Account")
+            self.btn_oauth_login.setText("🔄  Switch")
             self.btn_oauth_login.setProperty("class", "btn-secondary")
             self.btn_oauth_login.style().unpolish(self.btn_oauth_login)
             self.btn_oauth_login.style().polish(self.btn_oauth_login)
             self.btn_logout.setVisible(True)
+            self.login_banner.setVisible(False)
         else:
             self.account_name_label.setText("No Dropbox account connected")
-            self.account_sub_label.setText("Sign in to your Dropbox account to inspect and download shared links.")
-            self.account_sub_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            self.account_sub_label.setText("Sign in to your Dropbox account")
+            self.account_sub_label.setStyleSheet("font-size: 10px; color: #94a3b8;")
             self.set_auth_badge("○ Not Logged In", "neutral")
-            self.btn_oauth_login.setText("🌐  Log In with Dropbox")
+            self.btn_oauth_login.setText("🌐  Log In")
             self.btn_oauth_login.setProperty("class", "btn-primary")
             self.btn_oauth_login.style().unpolish(self.btn_oauth_login)
             self.btn_oauth_login.style().polish(self.btn_oauth_login)
             self.btn_logout.setVisible(False)
+            self.login_banner.setVisible(True)
+
+        self.update_feature_enabled_state()
+
+    def update_feature_enabled_state(self):
+        logged_in = self.is_logged_in()
+        is_running = self.download_thread is not None and self.download_thread.isRunning()
+        is_scanning = self.scan_thread is not None and self.scan_thread.isRunning()
+
+        if not logged_in:
+            # Strictly disable all operational features until user signs in
+            self.target_card.setEnabled(False)
+            self.tree_card.setEnabled(False)
+            self.url_input.setEnabled(False)
+            self.url_input.setPlaceholderText("Please log in first to enter a Dropbox link...")
+            self.btn_paste_url.setEnabled(False)
+            self.btn_clear_url.setEnabled(False)
+            self.btn_scan_url.setEnabled(False)
+            self.destination_input.setEnabled(False)
+            self.btn_browse.setEnabled(False)
+            self.btn_open_folder.setEnabled(False)
+            self.check_skip_existing.setEnabled(False)
+            self.tree_widget.setEnabled(False)
+            self.btn_select_all.setEnabled(False)
+            self.btn_deselect_all.setEnabled(False)
+            self.btn_expand_all.setEnabled(False)
+            self.btn_collapse_all.setEnabled(False)
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
+            self.show_empty_tree_placeholder()
+            self.set_selection_summary("(Sign in required)", "neutral")
+            self.set_status_badge("○ Login Required", "neutral")
+        else:
+            active = is_running or is_scanning
+            self.target_card.setEnabled(not is_running)
+            self.tree_card.setEnabled(not is_running)
+            self.url_input.setEnabled(not active)
+            self.url_input.setPlaceholderText("https://www.dropbox.com/scl/fo/... or https://www.dropbox.com/sh/...")
+            self.btn_paste_url.setEnabled(not active)
+            self.btn_clear_url.setEnabled(not active)
+            self.btn_scan_url.setEnabled(not active)
+            self.destination_input.setEnabled(not is_running)
+            self.btn_browse.setEnabled(not is_running)
+            self.btn_open_folder.setEnabled(not is_running)
+            self.check_skip_existing.setEnabled(not is_running)
+            self.tree_widget.setEnabled(not is_running)
+            self.btn_select_all.setEnabled(not active)
+            self.btn_deselect_all.setEnabled(not active)
+            self.btn_expand_all.setEnabled(not active)
+            self.btn_collapse_all.setEnabled(not active)
+            self.start_button.setEnabled(not is_running)
+            self.stop_button.setEnabled(is_running)
+            if not active:
+                self.set_status_badge("● Ready", "ready")
+
+            # Refresh placeholder item if tree is in empty placeholder state
+            if self.tree_widget.topLevelItemCount() == 1:
+                item = self.tree_widget.topLevelItem(0)
+                if item and item.data(0, Qt.ItemDataRole.UserRole) is None:
+                    self.show_empty_tree_placeholder()
+                    if not self.url_input.text().strip():
+                        self.set_selection_summary("(Paste link above to inspect folders)", "neutral")
+
+    def prompt_login_required(self, action_desc: str = "use this feature"):
+        confirmed = ModernMessageBox.question(
+            self,
+            "Dropbox Login Required",
+            f"You must sign into your Dropbox account to {action_desc}.\n\n"
+            "All folder scanning, selection, and download features are disabled until you sign in.\n\n"
+            "Would you like to log in with Dropbox now?",
+            yes_text="Log In with Dropbox",
+            no_text="Cancel",
+        )
+        if confirmed:
+            self.login_with_dropbox()
 
     def load_settings(self):
         saved_dest = str(self.settings.value("destination", str(Path.home() / "Downloads")))
@@ -1794,25 +2249,74 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(400, self.verify_saved_session)
         else:
             self.update_account_ui()
+            self.add_log("🔒 Welcome! Please sign into your Dropbox account above to unlock features.")
+
+    def cleanup_auth_thread(self):
+        if self.auth_thread:
+            if self.auth_thread.isRunning():
+                self.auth_thread.quit()
+                self.auth_thread.wait(3000)
+            self.auth_thread = None
+        self.auth_worker = None
+
+    def cleanup_verify_thread(self):
+        if self.verify_thread:
+            if self.verify_thread.isRunning():
+                self.verify_thread.quit()
+                self.verify_thread.wait(3000)
+            self.verify_thread = None
+        self.verify_worker = None
+
+    @Slot(str, str)
+    def on_verify_finished(self, name: str, email: str):
+        self.cleanup_verify_thread()
+        if name:
+            self.current_user_name = name
+        if email:
+            self.current_user_email = email
+        self.save_settings()
+        self.update_account_ui()
+        self.add_log(f"🔑 Restored session: {self.current_user_name} <{self.current_user_email}>")
+
+    @Slot(str)
+    def on_verify_expired(self, exc_msg: str):
+        self.cleanup_verify_thread()
+        self.add_log(f"⚠ Saved session expired or invalid ({exc_msg}). Signing out...")
+        self.current_access_token = ""
+        self.current_refresh_token = ""
+        self.current_user_name = ""
+        self.current_user_email = ""
+        self.save_settings()
+        self.update_account_ui()
+
+    @Slot(str)
+    def on_verify_failed(self, exc_msg: str):
+        self.cleanup_verify_thread()
+        self.add_log(f"⚠ Saved session could not be verified ({exc_msg}). Please sign in again if needed.")
+
+    @Slot(str)
+    def on_auth_status(self, msg: str):
+        self.add_log(f"ℹ {msg}")
 
     def verify_saved_session(self):
         if not self.is_logged_in():
             return
-        try:
-            dbx = create_dropbox_client(
-                access_token=self.current_access_token,
-                refresh_token=self.current_refresh_token,
-                app_key=self.get_app_key(),
-            )
-            account: Any = dbx.users_get_current_account()
-            if account and hasattr(account, "name") and account.name:
-                self.current_user_name = account.name.display_name
-                self.current_user_email = account.email
-                self.save_settings()
-                self.update_account_ui()
-                self.add_log(f"🔑 Restored session: {account.name.display_name} <{account.email}>")
-        except Exception as exc:
-            self.add_log(f"⚠ Saved session could not be verified ({exc}). Please sign in again if needed.")
+
+        self.cleanup_verify_thread()
+        self.verify_thread = QThread()
+        self.verify_worker = SessionVerifyWorker(
+            access_token=self.current_access_token,
+            refresh_token=self.current_refresh_token,
+            app_key=self.get_app_key(),
+        )
+        self.verify_worker.moveToThread(self.verify_thread)
+
+        self.verify_worker.finished.connect(self.on_verify_finished)
+        self.verify_worker.expired.connect(self.on_verify_expired)
+        self.verify_worker.failed.connect(self.on_verify_failed)
+
+        self.verify_thread.started.connect(self.verify_worker.run)
+        self.verify_thread.start()
 
     def save_settings(self):
         self.settings.setValue("destination", self.destination_input.text().strip())
@@ -1882,43 +2386,90 @@ class MainWindow(QMainWindow):
             if not ok or not code:
                 return
 
-            oauth_res: Any = flow.finish(code)
-            access_token = getattr(oauth_res, "access_token", None) or ""
-            refresh_token = getattr(oauth_res, "refresh_token", None) or ""
-
-            dbx = create_dropbox_client(
-                access_token=access_token,
-                refresh_token=refresh_token,
-                app_key=app_key,
+            # Show modern loader dialog immediately
+            loading_dialog = ModernLoadingDialog(
+                parent=self,
+                title="Connecting to Dropbox",
+                heading="Signing into Dropbox...",
+                status="Exchanging authorization code with Dropbox API...",
             )
-            account: Any = dbx.users_get_current_account()
-            user_name = account.name.display_name if account and hasattr(account, "name") and account.name else "Dropbox User"
-            user_email = account.email if account and hasattr(account, "email") else ""
 
-            self.current_access_token = access_token
-            self.current_refresh_token = refresh_token
-            self.current_user_name = user_name
-            self.current_user_email = user_email
+            self.set_status_badge("⏳ Signing In...", "running")
+            self.add_log("⏳ Exchanging OAuth authorization code with Dropbox API...")
+            self.btn_oauth_login.setEnabled(False)
+            self.btn_oauth_login.setText("⏳ Signing in...")
+            self.btn_banner_login.setEnabled(False)
+            self.btn_banner_login.setText("⏳ Signing in...")
 
-            self.save_settings()
-            self.update_account_ui()
-            self.add_log(f"✓ Successfully authenticated as {user_name} <{user_email}> via Dropbox OAuth!")
+            self.cleanup_auth_thread()
+            self.auth_thread = QThread()
+            self.auth_worker = AuthWorker(flow=flow, code=code, app_key=app_key)
+            self.auth_worker.moveToThread(self.auth_thread)
 
-            if self.url_input.text().strip():
-                self.start_scan()
+            self.auth_worker.status.connect(loading_dialog.set_status)
+            self.auth_worker.status.connect(self.on_auth_status)
+            self.auth_worker.progress.connect(loading_dialog.set_progress)
+            self.auth_worker.finished.connect(loading_dialog.on_auth_finished)
+            self.auth_worker.failed.connect(loading_dialog.on_auth_failed)
+            loading_dialog.cancelled.connect(self.auth_worker.cancel)
+
+            self.auth_thread.started.connect(self.auth_worker.run)
+            QTimer.singleShot(20, self.auth_thread.start)
+
+            loading_dialog.exec()
+
+            self.cleanup_auth_thread()
+
+            if loading_dialog.auth_success:
+                self.current_access_token = loading_dialog.auth_data.get("access_token", "")
+                self.current_refresh_token = loading_dialog.auth_data.get("refresh_token", "")
+                self.current_user_name = loading_dialog.auth_data.get("user_name", "")
+                self.current_user_email = loading_dialog.auth_data.get("user_email", "")
+
+                self.save_settings()
+                self.update_account_ui()
+                self.add_log(
+                    f"✓ Successfully authenticated as {self.current_user_name} "
+                    f"<{self.current_user_email}> via Dropbox OAuth!"
+                )
+                self.set_status_badge("● Connected", "success")
+                QTimer.singleShot(
+                    2500,
+                    lambda: self.set_status_badge("● Ready", "ready")
+                    if self.is_logged_in() and not (self.download_thread and self.download_thread.isRunning())
+                    else None,
+                )
+
+                if self.url_input.text().strip():
+                    self.start_scan()
+            elif loading_dialog.auth_error:
+                self.update_account_ui()
+                self.add_log(f"✕ Login failed: {loading_dialog.auth_error}")
+                ModernMessageBox.error(
+                    self,
+                    "Login Failed",
+                    f"Could not complete Dropbox authorization:\n\n{loading_dialog.auth_error}",
+                )
+            elif loading_dialog.is_cancelled:
+                self.update_account_ui()
+                self.add_log("⚠ Login was cancelled by user.")
+            else:
+                self.update_account_ui()
 
         except Exception as exc:
+            self.update_account_ui()
             ModernMessageBox.error(
                 self,
                 "Login Failed",
-                f"Could not complete Dropbox authorization:\n\n{exc}"
+                f"Could not initialize Dropbox authorization:\n\n{exc}",
             )
 
     def logout_dropbox(self):
         confirmed = ModernMessageBox.question(
             self,
             "Sign Out",
-            "Are you sure you want to sign out of your Dropbox account?",
+            "Are you sure you want to sign out of your Dropbox account?\n\n"
+            "All folder scanning, selection, and download features will be locked until you sign in again.",
             yes_text="Sign Out",
             no_text="Cancel",
             is_destructive=True,
@@ -1928,21 +2479,40 @@ class MainWindow(QMainWindow):
             self.current_refresh_token = ""
             self.current_user_name = ""
             self.current_user_email = ""
+            self.link_password = ""
             self.settings.remove("oauth_refresh_token")
             self.settings.remove("oauth_access_token")
             self.settings.remove("user_name")
             self.settings.remove("user_email")
             self.settings.remove("token")
+            self.clear_url_and_tree()
             self.update_account_ui()
-            self.add_log("Logged out of Dropbox account.")
+            self.add_log("🔒 Logged out of Dropbox account. All features are now disabled.")
 
-    def toggle_pwd_visibility(self):
-        if self.link_password_input.echoMode() == QLineEdit.EchoMode.Password:
-            self.link_password_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.btn_toggle_pwd.setText("Hide")
+    def toggle_log_visibility(self):
+        if self.log_box.isVisible():
+            self.log_box.setVisible(False)
+            self.btn_toggle_log.setText("Show Log")
         else:
-            self.link_password_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.btn_toggle_pwd.setText("Show")
+            self.log_box.setVisible(True)
+            self.btn_toggle_log.setText("Hide Log")
+
+    def show_empty_tree_placeholder(self):
+        self.tree_widget.clear()
+        if not self.is_logged_in():
+            placeholder = QTreeWidgetItem(
+                self.tree_widget,
+                ["🔒 Please log in to Dropbox above to inspect and download folders", "—", "—"]
+            )
+        else:
+            placeholder = QTreeWidgetItem(
+                self.tree_widget,
+                ["Paste a Dropbox link above and click '🔍 Load Folders'", "—", "—"]
+            )
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        placeholder.setForeground(0, QColor("#64748b"))
+        placeholder.setForeground(1, QColor("#64748b"))
+        placeholder.setForeground(2, QColor("#64748b"))
 
     def on_url_text_changed(self, text: str):
         text = text.strip()
@@ -1955,6 +2525,9 @@ class MainWindow(QMainWindow):
             self.start_scan()
 
     def paste_url(self):
+        if not self.is_logged_in():
+            self.prompt_login_required("paste and inspect shared links")
+            return
         clipboard = QApplication.clipboard()
         text = clipboard.text().strip()
         if text:
@@ -1963,8 +2536,12 @@ class MainWindow(QMainWindow):
 
     def clear_url_and_tree(self):
         self.url_input.clear()
-        self.tree_widget.clear()
-        self.selection_summary_label.setText("(Paste link to inspect folders)")
+        self.link_password = ""
+        self.show_empty_tree_placeholder()
+        if self.is_logged_in():
+            self.selection_summary_label.setText("(Paste link above to inspect folders)")
+        else:
+            self.selection_summary_label.setText("(Sign in required)")
 
     def browse_destination(self):
         folder = QFileDialog.getExistingDirectory(
@@ -1987,21 +2564,12 @@ class MainWindow(QMainWindow):
     # Folder Scanning & Tree Population
     # ==========================================================================
     def start_scan(self):
-        url = self.url_input.text().strip()
-        password = self.link_password_input.text().strip()
-
         if not self.is_logged_in():
-            confirmed = ModernMessageBox.question(
-                self,
-                "Dropbox Login Required",
-                "You need to sign into your Dropbox account to inspect shared folders.\n\n"
-                "Would you like to log in now?",
-                yes_text="Log In Now",
-                no_text="Cancel",
-            )
-            if confirmed:
-                self.login_with_dropbox()
+            self.prompt_login_required("inspect folder contents")
             return
+
+        url = self.url_input.text().strip()
+        password = (self.link_password or "").strip()
 
         if not url:
             ModernMessageBox.warning(self, "Missing URL", "Please enter or paste a valid Dropbox shared link.")
@@ -2028,11 +2596,15 @@ class MainWindow(QMainWindow):
         self.scan_worker.moveToThread(self.scan_thread)
 
         self.scan_thread.started.connect(self.scan_worker.run)
-        self.scan_worker.status.connect(lambda s: self.set_selection_summary(f"⏳ {s}", "active"))
+        self.scan_worker.status.connect(self.on_scan_status)
         self.scan_worker.finished.connect(self.on_scan_finished)
         self.scan_worker.failed.connect(self.on_scan_failed)
 
         self.scan_thread.start()
+
+    @Slot(str)
+    def on_scan_status(self, text: str):
+        self.set_selection_summary(f"⏳ {text}", "active")
 
     def on_scan_finished(self, tree_dict: dict, root_name: str, entries: list):
         self.btn_scan_url.setEnabled(True)
@@ -2060,19 +2632,30 @@ class MainWindow(QMainWindow):
             self.scan_thread.quit()
             self.scan_thread.wait()
 
-        self.tree_widget.clear()
         self.set_selection_summary("⚠️ Scan failed", "error")
         self.add_log(f"⚠️ Scan error: {error}")
 
-        if "password" in error.lower():
-            ModernMessageBox.information(
+        if "password" in error.lower() or "access_denied" in error.lower():
+            pwd, ok = ModernInputDialog.get_text(
                 self,
-                "Password Protected Folder",
-                "This Dropbox folder is password-protected.\n\n"
-                "Please enter the link password in the Folder Password field."
+                title="Password Protected Link",
+                heading="Dropbox Link Password Required",
+                message=(
+                    "This Dropbox shared folder is protected with a password.\n\n"
+                    "Please enter the password to inspect its contents:"
+                ),
+                placeholder="Enter folder link password...",
+                is_password=True,
+                confirm_text="Unlock & Load",
             )
-            self.link_password_input.setFocus()
+            if ok and pwd:
+                self.link_password = pwd.strip()
+                self.start_scan()
+                return
+            else:
+                self.show_empty_tree_placeholder()
         else:
+            self.show_empty_tree_placeholder()
             ModernMessageBox.warning(self, "Folder Scan Error", f"Could not inspect folders:\n\n{error}")
 
     def populate_tree_widget(self, tree_dict: dict, root_name: str):
@@ -2254,7 +2837,7 @@ class MainWindow(QMainWindow):
 
         def count_recursive(item: QTreeWidgetItem | None):
             nonlocal total_items, selected_items, selected_bytes
-            if item is None:
+            if item is None or item.data(0, Qt.ItemDataRole.UserRole) is None:
                 return
             total_items += 1
             state = item.checkState(0)
@@ -2291,11 +2874,16 @@ class MainWindow(QMainWindow):
         deselected_folders = set()
         total_files = 0
         total_selected_files = 0
-        has_tree_items = self.tree_widget.topLevelItemCount() > 0
+        has_tree_items = False
+        for i in range(self.tree_widget.topLevelItemCount()):
+            top_item = self.tree_widget.topLevelItem(i)
+            if top_item is not None and top_item.data(0, Qt.ItemDataRole.UserRole) is not None:
+                has_tree_items = True
+                break
 
         def traverse(item: QTreeWidgetItem | None, parent_path=""):
             nonlocal total_files, total_selected_files
-            if item is None:
+            if item is None or item.data(0, Qt.ItemDataRole.UserRole) is None:
                 return
             is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
             raw_name = item.data(3, Qt.ItemDataRole.UserRole) or item.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "").strip()
@@ -2344,6 +2932,7 @@ class MainWindow(QMainWindow):
     # ==========================================================================
     # Download Execution
     # ==========================================================================
+    @Slot(str)
     def add_log(self, text: str):
         timestamp = time.strftime("%H:%M:%S")
         formatted = f"[{timestamp}] {text}"
@@ -2374,39 +2963,27 @@ class MainWindow(QMainWindow):
         self.set_status_badge("● Log Copied", "success")
 
     def set_running(self, running: bool):
-        self.start_button.setEnabled(not running)
-        self.stop_button.setEnabled(running)
-        self.url_input.setEnabled(not running)
-        self.destination_input.setEnabled(not running)
-        self.link_password_input.setEnabled(not running)
         self.btn_oauth_login.setEnabled(not running)
         self.btn_logout.setEnabled(not running)
-        self.btn_scan_url.setEnabled(not running)
-        self.tree_widget.setEnabled(not running)
+        self.update_feature_enabled_state()
 
         if running:
             self.set_status_badge("● Downloading...", "running")
         else:
-            self.set_status_badge("● Ready", "ready")
+            if self.is_logged_in():
+                self.set_status_badge("● Ready", "ready")
+            else:
+                self.set_status_badge("○ Login Required", "neutral")
 
     def start_download(self):
+        if not self.is_logged_in():
+            self.prompt_login_required("download files")
+            return
+
         url = self.url_input.text().strip()
         destination = self.destination_input.text().strip()
         skip_existing = self.check_skip_existing.isChecked()
-        link_password = self.link_password_input.text().strip()
-
-        if not self.is_logged_in():
-            confirmed = ModernMessageBox.question(
-                self,
-                "Dropbox Login Required",
-                "You need to log into your Dropbox account to download files.\n\n"
-                "Would you like to log in now?",
-                yes_text="Log In Now",
-                no_text="Cancel",
-            )
-            if confirmed:
-                self.login_with_dropbox()
-            return
+        link_password = (self.link_password or "").strip()
 
         if not url:
             ModernMessageBox.warning(self, "Missing URL", "Please enter a Dropbox shared link.")
@@ -2474,8 +3051,8 @@ class MainWindow(QMainWindow):
         self.download_thread.started.connect(self.worker.run)
 
         self.worker.log.connect(self.add_log)
-        self.worker.folder_changed.connect(lambda txt: self.folder_label.setText(txt))
-        self.worker.file_changed.connect(lambda txt: self.file_label.setText(txt))
+        self.worker.folder_changed.connect(self.folder_label.setText)
+        self.worker.file_changed.connect(self.file_label.setText)
         self.worker.current_progress.connect(self.update_file_progress)
         self.worker.overall_progress.connect(self.update_overall_progress)
         self.worker.stats_changed.connect(self.update_stats)
@@ -2529,6 +3106,24 @@ class MainWindow(QMainWindow):
             self.download_thread.quit()
             self.download_thread.wait()
 
+        if "password" in error.lower() or "access_denied" in error.lower():
+            pwd, ok = ModernInputDialog.get_text(
+                self,
+                title="Password Protected Link",
+                heading="Dropbox Link Password Required",
+                message=(
+                    "This Dropbox shared link requires a password to download.\n\n"
+                    "Please enter the folder link password below:"
+                ),
+                placeholder="Enter folder link password...",
+                is_password=True,
+                confirm_text="Set Password & Retry",
+            )
+            if ok and pwd:
+                self.link_password = pwd.strip()
+                self.start_download()
+                return
+
         ModernMessageBox.error(self, "Download Failed", error)
 
     def closeEvent(self, event):
@@ -2540,6 +3135,14 @@ class MainWindow(QMainWindow):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.quit()
             self.scan_thread.wait()
+        if self.auth_thread and self.auth_thread.isRunning():
+            if self.auth_worker:
+                self.auth_worker.cancel()
+            self.auth_thread.quit()
+            self.auth_thread.wait(2000)
+        if self.verify_thread and self.verify_thread.isRunning():
+            self.verify_thread.quit()
+            self.verify_thread.wait(2000)
         event.accept()
 
 

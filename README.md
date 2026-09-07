@@ -39,15 +39,15 @@ When you open the app:
 - Your browser opens the Dropbox authorization page.
 - **Sign into ANY Dropbox account you want** (personal, work, or client account) and click **Allow**.
 - Copy the authorization code shown on screen and paste it into the prompt.
-- The app connects to your account, displays your account name and email, and remembers your session automatically!
+- The app displays an animated loader with real-time progress while securely exchanging tokens in the background, displays your account name and email, and remembers your session automatically!
 
 ---
 
 ## How to Use
 
-1. **Sign In**: Click **🌐 Log In with Dropbox** in Section 1. Your connected account status (`● Connected: Name (email)`) will be displayed.
-2. **Paste Link**: Enter or paste any Dropbox shared folder link into the **Dropbox Shared Link** box. (If the link is password-protected, enter the password in the password field).
-3. **Load Folders**: Click **🔍 Load Folders** (or let auto-scan run). The app inspects the shared folder and displays the directory tree.
+1. **Sign In to Unlock Features**: On launch or when signed out, all interactive features are disabled and a prompt asks you to sign in. Click **🌐 Log In with Dropbox** in the banner or top header. Your connected account status (`● Connected: Name (email)`) will be displayed in the header and all features unlock immediately.
+2. **Paste Link**: Enter or paste any Dropbox shared folder or file link into the **Dropbox Shared Link** box.
+3. **Load Folders**: Click **🔍 Load Folders** (or press Enter). If the link is password-protected, the app automatically presents a popup dialog to enter the password, then loads the directory tree.
 4. **Select Items**: Check or uncheck folders and files so you only download what you want.
 5. **Start Download**: Click **▶ Start Download**. The app downloads **only the selected files** directly into your local destination folder, preserving the exact subfolder hierarchy.
 
@@ -55,11 +55,16 @@ When you open the app:
 
 ## Features
 
+- **Login-Gated Workspace**: All functional controls (link loading, destination configuration, directory tree selection, and downloading) remain locked until an account is connected, preventing unauthenticated API failures.
+- **Dedicated Authentication Callout**: Prominent visual banner and locked tree placeholder asking the user to log in first, with 1-click OAuth activation.
+- **Animated Login Loader**: Sleek modal loader dialog featuring an animated spinner badge, pulsing gradient progress bar, and real-time step status ("Exchanging authorization code...", "Connecting to Dropbox API...", "Retrieving account profile...") to keep the user informed.
+- **Single Unified Link Input**: Clean, distraction-free link bar with smart automatic password prompting for password-protected links.
+- **Modern User-Friendly UI**: Top-bar account status, compact download configuration, interactive selection tree, live metrics dashboard, and toggleable activity log.
 - **User Account Login**: 1-click browser OAuth (PKCE) login with any Dropbox account. No secrets or manual token handling needed.
 - **Session Persistence**: Remembers your login across launches; sign out or switch accounts anytime with one click.
 - **Automatic Token Refresh**: Long-running downloads automatically refresh access tokens without session timeouts.
 - **Direct Selective Download**: Downloads only the specific files you check in the tree. No 100+ GB full-archive downloads.
-- **Password-Protected Links**: Supports password-protected Dropbox links with password entry.
+- **Automatic Password Unlock**: Automatically detects password-protected links and displays a modal prompt to unlock seamlessly.
 - **Interactive Directory Tree**: Expand/collapse folders, view item counts, formatted file sizes, and file type icons.
 - **Live Metrics Dashboard**: Real-time download speed (MB/s), bytes transferred, files completed, and elapsed time.
 - **Dual Progress Bars**: Individual file progress and overall batch progress.
