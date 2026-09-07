@@ -65,6 +65,9 @@ When you open the app:
 - **Automatic Token Refresh**: Long-running downloads automatically refresh access tokens without session timeouts.
 - **Direct Selective Download**: Downloads only the specific files you check in the tree. No 100+ GB full-archive downloads.
 - **Automatic Password Unlock**: Automatically detects password-protected links and displays a modal prompt to unlock seamlessly.
+- **Download Manager Controls (Pause & Resume)**: Instant pause and resume controls during active downloads with accurate paused duration compensation in elapsed time and transfer speed metrics.
+- **Recent Links History**: Quick-access chip bar and dropdown history menu saving your recently scanned Dropbox links and folder names for 1-click reloading.
+- **Smart Action State**: Dynamically enables and disables download buttons based on item selection, valid destination paths, and active connection status.
 - **Interactive Directory Tree**: Expand/collapse folders, view item counts, formatted file sizes, and file type icons.
 - **Live Metrics Dashboard**: Real-time download speed (MB/s), bytes transferred, files completed, and elapsed time.
 - **Dual Progress Bars**: Individual file progress and overall batch progress.

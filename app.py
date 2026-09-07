@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import re
+import json
+import threading
 import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -42,6 +44,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QDialog,
+    QMenu,
 )
 
 
@@ -302,6 +305,79 @@ QPushButton.btn-stop:disabled, QPushButton[class="btn-stop"]:disabled {
     background-color: #220d0f;
     border: 1px solid #3b171c;
     color: #592d33;
+}
+QPushButton.btn-pause, QPushButton[class="btn-pause"] {
+    background-color: #d97706;
+    border: 1px solid #f59e0b;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 10px 24px;
+    border-radius: 8px;
+}
+QPushButton.btn-pause:hover, QPushButton[class="btn-pause"]:hover {
+    background-color: #b45309;
+    border-color: #fbbf24;
+}
+QPushButton.btn-pause:pressed, QPushButton[class="btn-pause"]:pressed {
+    background-color: #92400e;
+}
+QPushButton.btn-pause:disabled, QPushButton[class="btn-pause"]:disabled {
+    background-color: #261b0c;
+    border: 1px solid #3d2912;
+    color: #6e4f2a;
+}
+QPushButton.btn-resume, QPushButton[class="btn-resume"] {
+    background-color: #059669;
+    border: 1px solid #10b981;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 10px 24px;
+    border-radius: 8px;
+}
+QPushButton.btn-resume:hover, QPushButton[class="btn-resume"]:hover {
+    background-color: #047857;
+    border-color: #34d399;
+}
+QPushButton.btn-resume:pressed, QPushButton[class="btn-resume"]:pressed {
+    background-color: #065f46;
+}
+QPushButton.recent-chip, QPushButton[class="recent-chip"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 13px;
+    padding: 3px 10px;
+    font-size: 11px;
+    color: #cbd5e1;
+    font-weight: 500;
+}
+QPushButton.recent-chip:hover, QPushButton[class="recent-chip"]:hover {
+    background-color: #2b3952;
+    border-color: #38bdf8;
+    color: #ffffff;
+}
+QMenu {
+    background-color: #0c1322;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px;
+    color: #f1f5f9;
+}
+QMenu::item {
+    padding: 8px 18px 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #cbd5e1;
+}
+QMenu::item:selected {
+    background-color: #1e293b;
+    color: #38bdf8;
+}
+QMenu::separator {
+    height: 1px;
+    background-color: #334155;
+    margin: 4px 6px;
 }
 QProgressBar {
     background-color: #090e1a;
@@ -851,6 +927,7 @@ class DownloadWorker(QObject):
     stats_changed = Signal(dict)
     finished = Signal(str)
     failed = Signal(str)
+    paused_signal = Signal(bool)
 
     def __init__(
         self,
@@ -883,6 +960,11 @@ class DownloadWorker(QObject):
         self.deselected_folders = deselected_folders or set()
         self.has_tree_filter = has_tree_filter
         self.stop_requested = False
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._is_paused = False
+        self.pause_start_time: float = 0.0
+        self.paused_duration: float = 0.0
         self.files: list[DownloadFileItem] = []
         self.folders = 0
         self.done = 0
@@ -901,8 +983,41 @@ class DownloadWorker(QObject):
             self.has_tree_filter,
         )
 
+    def pause(self):
+        if not self._is_paused and not self.stop_requested:
+            self._is_paused = True
+            self.pause_start_time = time.time()
+            self._pause_event.clear()
+            self.paused_signal.emit(True)
+            self.log.emit("⏸ Download paused.")
+
+    def resume(self):
+        if self._is_paused:
+            if self.pause_start_time > 0:
+                self.paused_duration += max(time.time() - self.pause_start_time, 0.0)
+                self.pause_start_time = 0.0
+            self._is_paused = False
+            self._pause_event.set()
+            self.paused_signal.emit(False)
+            self.log.emit("▶ Download resumed.")
+
+    def toggle_pause(self):
+        if self._is_paused:
+            self.resume()
+        else:
+            self.pause()
+
     def stop(self):
         self.stop_requested = True
+        if self._is_paused:
+            self._is_paused = False
+            self._pause_event.set()
+
+    def _check_pause(self):
+        while not self._pause_event.is_set():
+            if self.stop_requested:
+                break
+            time.sleep(0.1)
 
     def list_folder(self, dbx: dropbox.Dropbox, shared_link: SharedLink, path: str):
         result: Any = dbx.files_list_folder(
@@ -920,6 +1035,7 @@ class DownloadWorker(QObject):
                 yield from result.entries
 
     def collect(self, dbx: dropbox.Dropbox, shared_link: SharedLink, api_path="", rel_dir=""):
+        self._check_pause()
         if self.stop_requested:
             return
 
@@ -940,6 +1056,7 @@ class DownloadWorker(QObject):
             return
 
         for entry in entries:
+            self._check_pause()
             if self.stop_requested:
                 return
             if isinstance(entry, FileMetadata):
@@ -956,6 +1073,7 @@ class DownloadWorker(QObject):
                 )
 
         for entry in entries:
+            self._check_pause()
             if self.stop_requested:
                 return
             if isinstance(entry, FolderMetadata):
@@ -1017,6 +1135,7 @@ class DownloadWorker(QObject):
 
             with open(temp_file, "wb") as f:
                 for chunk in response.iter_content(chunk_size=1024 * 128):
+                    self._check_pause()
                     if self.stop_requested:
                         f.close()
                         temp_file.unlink(missing_ok=True)
@@ -1028,13 +1147,19 @@ class DownloadWorker(QObject):
                             pct = int(downloaded * 100 / file_size)
                             self.current_progress.emit(pct)
 
-                    elapsed = max(time.time() - start_time, 0.001)
-                    speed = downloaded / elapsed
+                    if self._is_paused:
+                        speed_str = "Paused"
+                    else:
+                        elapsed = max(time.time() - start_time, 0.001)
+                        speed = downloaded / elapsed
+                        speed_str = f"{format_bytes(int(speed))}/s"
+
+                    active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
                     self.stats_changed.emit({
-                        "speed": f"{format_bytes(int(speed))}/s",
+                        "speed": speed_str,
                         "data": f"{format_bytes(self.bytes_done + downloaded)}",
                         "files": f"{self.done + 1}/{len(self.files)} files",
-                        "elapsed": f"{int(max(time.time() - self.started, 0) // 60):02d}:{int(max(time.time() - self.started, 0) % 60):02d}",
+                        "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
                     })
 
             actual = temp_file.stat().st_size
@@ -1129,6 +1254,7 @@ class DownloadWorker(QObject):
             self.log.emit("🚀 Starting direct selective download...")
 
             for index, entry in enumerate(self.files, start=1):
+                self._check_pause()
                 if self.stop_requested:
                     break
 
@@ -1142,7 +1268,7 @@ class DownloadWorker(QObject):
                     int(index * 100 / max(len(self.files), 1))
                 )
 
-            elapsed = max(time.time() - self.started, 0.1)
+            elapsed = max(time.time() - self.started - self.paused_duration, 0.1)
 
             if self.stop_requested:
                 message = "Download cancelled by user."
@@ -1660,6 +1786,9 @@ class MainWindow(QMainWindow):
         self.current_user_name: str = ""
         self.current_user_email: str = ""
         self.link_password: str = ""
+        self.recent_links: list[dict[str, Any]] = []
+        self.is_download_paused: bool = False
+        self._is_running: bool = False
 
         self.auto_scan_timer = QTimer(self)
         self.auto_scan_timer.setSingleShot(True)
@@ -1843,6 +1972,10 @@ class MainWindow(QMainWindow):
         self.url_input.textChanged.connect(self.on_url_text_changed)
         self.url_input.returnPressed.connect(self.start_scan)
 
+        self.btn_recent_links = QPushButton("🕒 Recent ▼")
+        self.btn_recent_links.setToolTip("Select from previously saved Dropbox links")
+        self.btn_recent_links.clicked.connect(self.show_recent_links_menu)
+
         self.btn_paste_url = QPushButton("📋 Paste")
         self.btn_paste_url.setToolTip("Paste link from clipboard and scan")
         self.btn_paste_url.clicked.connect(self.paste_url)
@@ -1857,10 +1990,19 @@ class MainWindow(QMainWindow):
         self.btn_scan_url.clicked.connect(self.start_scan)
 
         url_row.addWidget(self.url_input, 1)
+        url_row.addWidget(self.btn_recent_links)
         url_row.addWidget(self.btn_paste_url)
         url_row.addWidget(self.btn_clear_url)
         url_row.addWidget(self.btn_scan_url)
         target_layout.addLayout(url_row)
+
+        # Quick Recent Links Chips Row
+        self.recent_chips_container = QWidget()
+        self.recent_chips_layout = QHBoxLayout(self.recent_chips_container)
+        self.recent_chips_layout.setContentsMargins(0, 0, 0, 0)
+        self.recent_chips_layout.setSpacing(6)
+        self.recent_chips_container.setVisible(False)
+        target_layout.addWidget(self.recent_chips_container)
 
         dest_label = QLabel("Save Downloaded Files To:")
         dest_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1; margin-top: 4px;")
@@ -2060,16 +2202,23 @@ class MainWindow(QMainWindow):
         actions_row = QHBoxLayout()
         actions_row.setSpacing(12)
 
-        self.start_button = QPushButton("▶  Start Download")
+        self.start_button = QPushButton("📋  Paste Link & Select Files to Start")
         self.start_button.setProperty("class", "btn-start")
+        self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_download)
 
-        self.stop_button = QPushButton("⏹  Stop")
+        self.pause_button = QPushButton("⏸  Pause Download")
+        self.pause_button.setProperty("class", "btn-pause")
+        self.pause_button.setVisible(False)
+        self.pause_button.clicked.connect(self.toggle_pause_download)
+
+        self.stop_button = QPushButton("⏹  Stop Download")
         self.stop_button.setProperty("class", "btn-stop")
-        self.stop_button.setEnabled(False)
+        self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self.stop_download)
 
-        actions_row.addWidget(self.start_button, 3)
+        actions_row.addWidget(self.start_button, 1)
+        actions_row.addWidget(self.pause_button, 1)
         actions_row.addWidget(self.stop_button, 1)
         progress_layout.addLayout(actions_row)
 
@@ -2157,8 +2306,11 @@ class MainWindow(QMainWindow):
         self.update_feature_enabled_state()
 
     def update_feature_enabled_state(self):
+        if not hasattr(self, "btn_recent_links") or self.btn_recent_links is None:
+            return
+
         logged_in = self.is_logged_in()
-        is_running = self.download_thread is not None and self.download_thread.isRunning()
+        is_running = self._is_running or (self.download_thread is not None and self.download_thread.isRunning())
         is_scanning = self.scan_thread is not None and self.scan_thread.isRunning()
 
         if not logged_in:
@@ -2167,6 +2319,7 @@ class MainWindow(QMainWindow):
             self.tree_card.setEnabled(False)
             self.url_input.setEnabled(False)
             self.url_input.setPlaceholderText("Please log in first to enter a Dropbox link...")
+            self.btn_recent_links.setEnabled(False)
             self.btn_paste_url.setEnabled(False)
             self.btn_clear_url.setEnabled(False)
             self.btn_scan_url.setEnabled(False)
@@ -2179,8 +2332,6 @@ class MainWindow(QMainWindow):
             self.btn_deselect_all.setEnabled(False)
             self.btn_expand_all.setEnabled(False)
             self.btn_collapse_all.setEnabled(False)
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(False)
             self.show_empty_tree_placeholder()
             self.set_selection_summary("(Sign in required)", "neutral")
             self.set_status_badge("○ Login Required", "neutral")
@@ -2190,6 +2341,7 @@ class MainWindow(QMainWindow):
             self.tree_card.setEnabled(not is_running)
             self.url_input.setEnabled(not active)
             self.url_input.setPlaceholderText("https://www.dropbox.com/scl/fo/... or https://www.dropbox.com/sh/...")
+            self.btn_recent_links.setEnabled(not active)
             self.btn_paste_url.setEnabled(not active)
             self.btn_clear_url.setEnabled(not active)
             self.btn_scan_url.setEnabled(not active)
@@ -2202,8 +2354,6 @@ class MainWindow(QMainWindow):
             self.btn_deselect_all.setEnabled(not active)
             self.btn_expand_all.setEnabled(not active)
             self.btn_collapse_all.setEnabled(not active)
-            self.start_button.setEnabled(not is_running)
-            self.stop_button.setEnabled(is_running)
             if not active:
                 self.set_status_badge("● Ready", "ready")
 
@@ -2214,6 +2364,218 @@ class MainWindow(QMainWindow):
                     self.show_empty_tree_placeholder()
                     if not self.url_input.text().strip():
                         self.set_selection_summary("(Paste link above to inspect folders)", "neutral")
+
+        self.update_download_button_state()
+
+    def update_download_button_state(self):
+        if (
+            not hasattr(self, "start_button")
+            or not hasattr(self, "pause_button")
+            or not hasattr(self, "stop_button")
+            or self.start_button is None
+            or self.pause_button is None
+            or self.stop_button is None
+        ):
+            return
+
+        logged_in = self.is_logged_in()
+        is_running = self._is_running or (self.download_thread is not None and self.download_thread.isRunning())
+        is_scanning = self.scan_thread is not None and self.scan_thread.isRunning()
+
+        if is_running:
+            self.start_button.setVisible(False)
+            self.pause_button.setVisible(True)
+            self.stop_button.setVisible(True)
+            self.pause_button.setEnabled(True)
+            self.stop_button.setEnabled(True)
+            return
+
+        # Not running -> Hide pause and stop, show start button
+        self.pause_button.setVisible(False)
+        self.stop_button.setVisible(False)
+        self.start_button.setVisible(True)
+
+        if not logged_in:
+            self.start_button.setEnabled(False)
+            self.start_button.setText("🔒  Log In to Start")
+            self.start_button.setToolTip("Please sign in to Dropbox to enable downloading.")
+            return
+
+        if is_scanning:
+            self.start_button.setEnabled(False)
+            self.start_button.setText("⏳  Loading Folders...")
+            self.start_button.setToolTip("Scanning Dropbox shared link hierarchy...")
+            return
+
+        url = self.url_input.text().strip()
+        has_link = bool(url and ("dropbox.com" in url) and ("http://" in url or "https://" in url))
+
+        info = self.get_tree_selection_info()
+        has_tree = info.get("has_tree_items", False)
+        selected_count = info.get("selected_file_count", 0)
+
+        if not has_link:
+            self.start_button.setEnabled(False)
+            self.start_button.setText("📋  Paste Link & Select Files to Start")
+            self.start_button.setToolTip("Paste a Dropbox shared link above to get started.")
+        elif not has_tree:
+            self.start_button.setEnabled(False)
+            self.start_button.setText("🔍  Load Folders to Select Files")
+            self.start_button.setToolTip("Click 'Load Folders' (or press Enter) to inspect files.")
+        elif selected_count == 0:
+            self.start_button.setEnabled(False)
+            self.start_button.setText("☑  Select Files to Start")
+            self.start_button.setToolTip("Check at least one file or folder in the tree above to start download.")
+        else:
+            self.start_button.setEnabled(True)
+            self.start_button.setText(f"▶  Start Download ({selected_count} file{'s' if selected_count != 1 else ''})")
+            self.start_button.setToolTip(f"Download {selected_count} selected files to local destination")
+
+    def toggle_pause_download(self):
+        if self.worker:
+            self.worker.toggle_pause()
+
+    def on_download_paused_changed(self, is_paused: bool):
+        self.is_download_paused = is_paused
+        if is_paused:
+            self.pause_button.setText("▶  Resume Download")
+            self.pause_button.setProperty("class", "btn-resume")
+            st = self.pause_button.style()
+            if st is not None:
+                st.unpolish(self.pause_button)
+                st.polish(self.pause_button)
+            self.set_status_badge("⏸ Paused", "warning")
+            self.val_speed.setText("Paused")
+            self.add_log("⏸ Download paused by user.")
+        else:
+            self.pause_button.setText("⏸  Pause Download")
+            self.pause_button.setProperty("class", "btn-pause")
+            st = self.pause_button.style()
+            if st is not None:
+                st.unpolish(self.pause_button)
+                st.polish(self.pause_button)
+            self.set_status_badge("● Downloading...", "running")
+            self.add_log("▶ Download resumed.")
+
+    def add_recent_link(self, url: str, title: str = "", item_count: int = 0):
+        url = url.strip()
+        if not url or "dropbox.com" not in url:
+            return
+
+        if not title:
+            parsed = urlparse(url)
+            path_parts = [p for p in parsed.path.split("/") if p]
+            title = path_parts[-1] if path_parts else "Dropbox Folder"
+
+        now = time.time()
+        date_str = time.strftime("%b %d, %H:%M", time.localtime(now))
+
+        filtered = [item for item in self.recent_links if item.get("url") != url]
+        new_item = {
+            "url": url,
+            "title": title,
+            "item_count": item_count,
+            "timestamp": now,
+            "date_str": date_str,
+        }
+        self.recent_links = [new_item] + filtered
+        self.recent_links = self.recent_links[:15]
+        self.save_settings()
+        self.update_recent_links_ui()
+
+    def update_recent_links_ui(self):
+        if (
+            not hasattr(self, "recent_chips_layout")
+            or not hasattr(self, "recent_chips_container")
+            or self.recent_chips_layout is None
+            or self.recent_chips_container is None
+        ):
+            return
+
+        while self.recent_chips_layout.count():
+            child = self.recent_chips_layout.takeAt(0)
+            if child is not None:
+                w = child.widget()
+                if w is not None:
+                    w.deleteLater()
+
+        if not self.recent_links:
+            self.recent_chips_container.setVisible(False)
+            return
+
+        lbl = QLabel("Recent:")
+        lbl.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 600; padding-right: 2px;")
+        self.recent_chips_layout.addWidget(lbl)
+
+        for item in self.recent_links[:4]:
+            title = item.get("title") or "Dropbox Folder"
+            display_name = (title[:18] + "…") if len(title) > 20 else title
+
+            chip_btn = QPushButton(f"📁 {display_name}")
+            chip_btn.setProperty("class", "recent-chip")
+            chip_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            tooltip_txt = f"{title}\n{item.get('url', '')}\nSaved: {item.get('date_str', '')}"
+            if item.get("item_count"):
+                tooltip_txt += f" ({item.get('item_count')} items)"
+            chip_btn.setToolTip(tooltip_txt)
+
+            chip_url = item.get("url", "")
+            chip_btn.clicked.connect(lambda _, u=chip_url: self.load_recent_link(u))
+            self.recent_chips_layout.addWidget(chip_btn)
+
+        if len(self.recent_links) > 4:
+            more_btn = QPushButton(f"⋯ All ({len(self.recent_links)})")
+            more_btn.setProperty("class", "recent-chip")
+            more_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            more_btn.setToolTip("View all recent links in dropdown")
+            more_btn.clicked.connect(self.show_recent_links_menu)
+            self.recent_chips_layout.addWidget(more_btn)
+
+        self.recent_chips_layout.addStretch()
+        self.recent_chips_container.setVisible(True)
+
+    def show_recent_links_menu(self):
+        if not self.is_logged_in():
+            self.prompt_login_required("view recent links")
+            return
+
+        menu = QMenu(self)
+        if not self.recent_links:
+            empty_act = menu.addAction("No recent links saved")
+            empty_act.setEnabled(False)
+        else:
+            for item in self.recent_links:
+                title = item.get("title") or "Dropbox Folder"
+                url = item.get("url", "")
+                cnt = item.get("item_count")
+                cnt_txt = f" ({cnt} items)" if cnt else ""
+                date_txt = f" [{item.get('date_str', '')}]" if item.get("date_str") else ""
+                short_url = url[:60] + ("..." if len(url) > 60 else "")
+                action_text = f"📁 {title}{cnt_txt}{date_txt}\n    {short_url}"
+                act = menu.addAction(action_text)
+                act.triggered.connect(lambda _, u=url: self.load_recent_link(u))
+
+            menu.addSeparator()
+            clear_act = menu.addAction("🗑  Clear Recent Links History")
+            clear_act.triggered.connect(self.clear_recent_links)
+
+        if hasattr(self, "btn_recent_links") and self.btn_recent_links is not None:
+            menu.exec(self.btn_recent_links.mapToGlobal(self.btn_recent_links.rect().bottomLeft()))
+        else:
+            menu.exec(QCursor.pos())
+
+    def load_recent_link(self, url: str):
+        if not self.is_logged_in():
+            self.prompt_login_required("load this link")
+            return
+        self.url_input.setText(url)
+        self.start_scan()
+
+    def clear_recent_links(self):
+        self.recent_links = []
+        self.save_settings()
+        self.update_recent_links_ui()
+        self.add_log("Recent links history cleared.")
 
     def prompt_login_required(self, action_desc: str = "use this feature"):
         confirmed = ModernMessageBox.question(
@@ -2232,6 +2594,18 @@ class MainWindow(QMainWindow):
         saved_dest = str(self.settings.value("destination", str(Path.home() / "Downloads")))
         if saved_dest:
             self.destination_input.setText(saved_dest)
+
+        recent_raw = self.settings.value("recent_links_json", "")
+        if recent_raw:
+            try:
+                self.recent_links = json.loads(str(recent_raw))
+                if not isinstance(self.recent_links, list):
+                    self.recent_links = []
+            except Exception:
+                self.recent_links = []
+        else:
+            self.recent_links = []
+        self.update_recent_links_ui()
 
         saved_refresh = str(self.settings.value("oauth_refresh_token", "")).strip()
         saved_access = str(self.settings.value("oauth_access_token", "")).strip()
@@ -2339,6 +2713,11 @@ class MainWindow(QMainWindow):
             self.settings.setValue("user_email", self.current_user_email)
         else:
             self.settings.remove("user_email")
+
+        if self.recent_links:
+            self.settings.setValue("recent_links_json", json.dumps(self.recent_links))
+        else:
+            self.settings.remove("recent_links_json")
 
     def login_with_dropbox(self):
         app_key = self.get_app_key()
@@ -2515,6 +2894,7 @@ class MainWindow(QMainWindow):
         placeholder.setForeground(2, QColor("#64748b"))
 
     def on_url_text_changed(self, text: str):
+        self.update_download_button_state()
         text = text.strip()
         if "dropbox.com" in text and ("http://" in text or "https://" in text):
             self.auto_scan_timer.start(700)
@@ -2542,6 +2922,7 @@ class MainWindow(QMainWindow):
             self.selection_summary_label.setText("(Paste link above to inspect folders)")
         else:
             self.selection_summary_label.setText("(Sign in required)")
+        self.update_download_button_state()
 
     def browse_destination(self):
         folder = QFileDialog.getExistingDirectory(
@@ -2585,6 +2966,8 @@ class MainWindow(QMainWindow):
         loading_item = QTreeWidgetItem(self.tree_widget, ["⏳ Loading folders from Dropbox...", "", ""])
         loading_item.setFlags(loading_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
 
+        self.update_download_button_state()
+
         self.scan_thread = QThread()
         self.scan_worker = ScanWorker(
             url=url,
@@ -2623,6 +3006,9 @@ class MainWindow(QMainWindow):
 
         self.add_log(f"✓ Found {len(entries)} items ({folders_count} folder(s), {files_count} file(s), {format_bytes(total_size)})")
         self.update_selection_summary()
+        url = self.url_input.text().strip()
+        self.add_recent_link(url, title=root_name, item_count=len(entries))
+        self.update_download_button_state()
 
     def on_scan_failed(self, error: str):
         self.btn_scan_url.setEnabled(True)
@@ -2632,8 +3018,10 @@ class MainWindow(QMainWindow):
             self.scan_thread.quit()
             self.scan_thread.wait()
 
+        self.show_empty_tree_placeholder()
         self.set_selection_summary("⚠️ Scan failed", "error")
         self.add_log(f"⚠️ Scan error: {error}")
+        self.update_download_button_state()
 
         if "password" in error.lower() or "access_denied" in error.lower():
             pwd, ok = ModernInputDialog.get_text(
@@ -2867,6 +3255,8 @@ class MainWindow(QMainWindow):
             self.selection_summary_label.setText(summary_txt)
             self.selection_summary_label.setStyleSheet("font-size: 11px; color: #10b981; font-weight: 600;")
 
+        self.update_download_button_state()
+
     def get_tree_selection_info(self) -> dict[str, Any]:
         selected_files = set()
         deselected_files = set()
@@ -2963,6 +3353,7 @@ class MainWindow(QMainWindow):
         self.set_status_badge("● Log Copied", "success")
 
     def set_running(self, running: bool):
+        self._is_running = running
         self.btn_oauth_login.setEnabled(not running)
         self.btn_logout.setEnabled(not running)
         self.update_feature_enabled_state()
@@ -3014,6 +3405,7 @@ class MainWindow(QMainWindow):
                 return
 
         self.save_settings()
+        self.add_recent_link(url, title="", item_count=info.get("selected_file_count", 0))
 
         self.file_progress.setValue(0)
         self.overall_progress.setValue(0)
@@ -3025,6 +3417,14 @@ class MainWindow(QMainWindow):
         self.val_data.setText("0 B")
         self.val_files.setText("0 files")
         self.val_time.setText("00:00")
+
+        self.is_download_paused = False
+        self.pause_button.setText("⏸  Pause Download")
+        self.pause_button.setProperty("class", "btn-pause")
+        st = self.pause_button.style()
+        if st is not None:
+            st.unpolish(self.pause_button)
+            st.polish(self.pause_button)
 
         self.set_running(True)
         self.add_log("▶ Starting selective download via Dropbox API...")
@@ -3056,6 +3456,7 @@ class MainWindow(QMainWindow):
         self.worker.current_progress.connect(self.update_file_progress)
         self.worker.overall_progress.connect(self.update_overall_progress)
         self.worker.stats_changed.connect(self.update_stats)
+        self.worker.paused_signal.connect(self.on_download_paused_changed)
 
         self.worker.finished.connect(self.download_finished)
         self.worker.failed.connect(self.download_failed)
@@ -3082,20 +3483,29 @@ class MainWindow(QMainWindow):
 
     def stop_download(self):
         if self.worker:
+            if hasattr(self, "stop_button") and self.stop_button is not None:
+                self.stop_button.setEnabled(False)
+            if hasattr(self, "pause_button") and self.pause_button is not None:
+                self.pause_button.setEnabled(False)
             self.worker.stop()
-            self.add_log("⏹ Stop requested. Terminating gracefully...")
+            self.add_log("⏹ Stop requested. Terminating whole operation...")
             self.set_status_badge("● Stopping...", "warning")
 
     def download_finished(self, message: str):
         self.set_running(False)
         self.add_log(f"\n{message}")
-        self.set_status_badge("● Complete", "success")
+        if "stopped" in message.lower() or "cancelled" in message.lower():
+            self.set_status_badge("⏹ Stopped", "neutral")
+            self.folder_label.setText("Stopped")
+            self.file_label.setText("Download operation stopped")
+            ModernMessageBox.information(self, "Download Stopped", message)
+        else:
+            self.set_status_badge("● Complete", "success")
+            ModernMessageBox.information(self, "Download Complete", message)
 
         if self.download_thread:
             self.download_thread.quit()
             self.download_thread.wait()
-
-        ModernMessageBox.information(self, "Download Complete", message)
 
     def download_failed(self, error: str):
         self.set_running(False)
