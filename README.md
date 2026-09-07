@@ -68,9 +68,10 @@ When you open the app:
 - **Download Manager Controls (Pause & Resume)**: Instant pause and resume controls during active downloads with accurate paused duration compensation in elapsed time and transfer speed metrics.
 - **Recent Links History**: Quick-access chip bar and dropdown history menu saving your recently scanned Dropbox links and folder names for 1-click reloading.
 - **Smart Action State**: Dynamically enables and disables download buttons based on item selection, valid destination paths, and active connection status.
-- **Interactive Directory Tree**: Expand/collapse folders, view item counts, formatted file sizes, and file type icons.
+- **Interactive Directory Tree**: Expand/collapse folders, view item counts, formatted file sizes, file type icons, and right-click context menu for batch selecting or expanding subfolders.
+- **Human-Friendly Error Guidance**: Clear, contextual error dialogs explaining link expirations, network interruptions, access permissions, and password requirements with actionable steps.
 - **Live Metrics Dashboard**: Real-time download speed (MB/s), bytes transferred, files completed, and elapsed time.
-- **Dual Progress Bars**: Individual file progress and overall batch progress.
+- **Dual Progress Bars**: Individual file progress and overall batch progress with 100% completion confirmation.
 - **Smart Skip**: Skips files that already exist locally with matching file size.
 - **Activity Log**: Searchable and filterable log console with one-click copy and clear.
-- **Safe & Resilient**: Graceful cancelation, temporary download files, and path sanitization.
+- **Safe & Resilient**: Graceful cancellation, thread lifecycle management, temporary download files, and path sanitization.

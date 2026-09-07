@@ -6,7 +6,7 @@ import json
 import threading
 import webbrowser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from typing import Any
 from dataclasses import dataclass
 
@@ -504,6 +504,160 @@ def sanitize_filename(name: str) -> str:
     return sanitized or "DropboxDownload"
 
 
+def extract_folder_name_from_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        path = unquote(parsed.path).strip("/")
+        parts = [p.strip() for p in path.split("/") if p.strip()]
+        # /scl/fo/<id>/... paths contain an opaque internal ID, not the folder name
+        if "scl" in parts and "fo" in parts:
+            return ""
+        ignore_parts = {"scl", "fo", "fi", "sh", "s", "h", "dl", "home", "personal", "work"}
+        valid_parts = [p for p in parts if p.lower() not in ignore_parts and len(p) > 2]
+        if valid_parts:
+            candidate = valid_parts[-1]
+            if candidate.lower() not in ignore_parts:
+                if re.match(r'^[a-zA-Z0-9_-]{16,}$', candidate) and any(c.isdigit() for c in candidate) and any(c.isalpha() for c in candidate):
+                    return ""
+                return sanitize_filename(candidate)
+    except Exception:
+        pass
+    return ""
+
+
+def parse_friendly_error(error: Any) -> tuple[str, str]:
+    err_str = str(error or "").strip()
+    err_lower = err_str.lower()
+
+    # 1. Broken / Not found / Expired link
+    if any(k in err_lower for k in (
+        "shared_link_not_found", "link_not_found", "not_found", "does not exist",
+        "could not find", "endpoint_not_found", "path/not_found"
+    )):
+        return (
+            "Link Not Working",
+            "This Dropbox link is not working or could not be found.\n\n"
+            "• The shared link may have been deleted, expired, or mistyped.\n"
+            "• Please ensure you copied the full Dropbox shared link correctly."
+        )
+
+    # 2. Password protected / Access denied
+    if any(k in err_lower for k in ("password", "requires_password")):
+        return (
+            "Password Required",
+            "This Dropbox shared folder is protected with a password.\n\n"
+            "Please enter the link password to view and download files."
+        )
+
+    if any(k in err_lower for k in ("shared_link_access_denied", "access_denied", "access denied", "permission_denied")):
+        return (
+            "Access Restricted",
+            "Access to this Dropbox link is restricted.\n\n"
+            "• You may not have permission to view or download this content.\n"
+            "• If this folder requires a password, please provide it."
+        )
+
+    # 3. Invalid link / malformed URL
+    if any(k in err_lower for k in (
+        "invalid dropbox", "valid dropbox shared url", "invalid_shared_link",
+        "malformed_path", "unsupported_link_type"
+    )):
+        return (
+            "Invalid Dropbox Link",
+            "The entered address is not a valid Dropbox link.\n\n"
+            "Please paste a link starting with https://www.dropbox.com/scl/... or https://www.dropbox.com/sh/..."
+        )
+
+    # 4. Authentication / Session expired
+    if any(k in err_lower for k in (
+        "expired_access_token", "invalid_access_token", "autherror",
+        "sign in with your dropbox account", "session expired", "invalid or expired"
+    )):
+        return (
+            "Sign-In Required",
+            "Your Dropbox sign-in session is missing or has expired.\n\n"
+            "Please click 'Disconnect' (or 'Sign in with Dropbox') above to reconnect your account."
+        )
+
+    # 5. Network / Offline / Connection errors
+    if any(k in err_lower for k in (
+        "connectionerror", "max retries exceeded", "failed to establish a new connection",
+        "getaddrinfo failed", "nodename nor servname provided", "network is unreachable",
+        "name or service not known", "dns_probe"
+    )):
+        return (
+            "Network Connection Error",
+            "Could not connect to Dropbox servers.\n\n"
+            "Please check your internet connection and verify that you are online."
+        )
+
+    # 6. Timeout
+    if "timeout" in err_lower or "timed out" in err_lower:
+        return (
+            "Connection Timed Out",
+            "The request to Dropbox took too long to complete.\n\n"
+            "Please check your network speed and try again."
+        )
+
+    # 7. SSL / Firewall
+    if "sslerror" in err_lower or "certificate verify failed" in err_lower:
+        return (
+            "Secure Connection Failed",
+            "Could not establish a secure SSL connection to Dropbox.\n\n"
+            "Please check if a VPN, proxy, or antivirus firewall is blocking Dropbox."
+        )
+
+    # 8. Rate Limiting / 429
+    if any(k in err_lower for k in ("ratelimit", "too_many_requests", "too_many_write_operations", "429")):
+        return (
+            "Dropbox Busy",
+            "Dropbox is temporarily rate limiting requests due to high traffic.\n\n"
+            "Please wait a minute or two and try again."
+        )
+
+    # 9. Local disk & file system
+    if any(k in err_lower for k in ("permission denied", "access is denied", "winerror 5")):
+        return (
+            "Permission Denied",
+            "Cannot write to the selected destination folder.\n\n"
+            "Please choose a local folder with write permissions (e.g. your Downloads or Documents folder)."
+        )
+
+    if any(k in err_lower for k in ("no space left on device", "enospc", "disk full")):
+        return (
+            "Disk Full",
+            "There is not enough free storage space on your hard drive.\n\n"
+            "Please free up disk space or choose a different save drive."
+        )
+
+    if "unsafe dropbox path" in err_lower:
+        return (
+            "Invalid Destination Path",
+            "The save destination path is invalid.\n\n"
+            "Please choose a standard local folder on your computer."
+        )
+
+    # 10. File size mismatch
+    if "size mismatch" in err_lower:
+        return (
+            "Download Interrupted",
+            "A file download was interrupted before completing.\n\n"
+            "Please click 'Start Download' again to resume downloading the remaining files."
+        )
+
+    # Clean fallback
+    cleaned = err_str
+    cleaned = re.sub(r'^[a-zA-Z0-9_.]+(?:Error|Exception)\s*:\s*', '', cleaned)
+    cleaned = re.sub(r'^ApiError\([\'"][^\'"]*[\'"],\s*', '', cleaned).rstrip(')')
+    if not cleaned or len(cleaned) < 3:
+        cleaned = "An unexpected error occurred while communicating with Dropbox."
+
+    return (
+        "Dropbox Error",
+        f"{cleaned}\n\nPlease verify your link and connection, then try again."
+    )
+
+
 def safe_local_path(root: Path, relative_path: str) -> Path:
     normalized = relative_path.replace("\\", "/").strip("/")
     parts = []
@@ -812,10 +966,16 @@ class ScanWorker(QObject):
         self.app_key = (app_key or "").strip()
         self.token = self.access_token
         self.password = password.strip() if password else None
+        self._is_cancelled: bool = False
+
+    def cancel(self):
+        self._is_cancelled = True
 
     @Slot()
     def run(self):
         try:
+            if self._is_cancelled:
+                return
             parsed = urlparse(self.url)
             if parsed.scheme not in ("http", "https") or "dropbox.com" not in parsed.netloc:
                 raise ValueError("Please enter a valid Dropbox shared URL.")
@@ -855,10 +1015,14 @@ class ScanWorker(QObject):
             self.status.emit("Querying folder hierarchy...")
 
             def collect_recursive(api_path="", rel_dir=""):
+                if self._is_cancelled:
+                    return
                 res: Any = dbx.files_list_folder(path=api_path, shared_link=shared_link, recursive=False)
                 subfolders_to_visit = []
                 if res and hasattr(res, "entries"):
                     for e in res.entries:
+                        if self._is_cancelled:
+                            return
                         is_dir = isinstance(e, FolderMetadata)
                         name = e.name
                         if not name:
@@ -871,9 +1035,13 @@ class ScanWorker(QObject):
                             subfolders_to_visit.append((next_api, rel))
 
                 while res and getattr(res, "has_more", False):
+                    if self._is_cancelled:
+                        return
                     res = dbx.files_list_folder_continue(res.cursor)
                     if res and hasattr(res, "entries"):
                         for e in res.entries:
+                            if self._is_cancelled:
+                                return
                             is_dir = isinstance(e, FolderMetadata)
                             name = e.name
                             if not name:
@@ -886,16 +1054,22 @@ class ScanWorker(QObject):
                                 subfolders_to_visit.append((next_api, rel))
 
                 for next_api, next_rel in subfolders_to_visit:
+                    if self._is_cancelled:
+                        return
                     collect_recursive(next_api, next_rel)
 
             collect_recursive("", "")
+
+            if self._is_cancelled:
+                return
 
             root_name = sanitize_filename(root_name) or "DropboxFolder"
             tree = build_tree_hierarchy(entries, root_name)
             self.finished.emit(tree, root_name, entries)
 
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self._is_cancelled:
+                self.failed.emit(str(exc))
 
 
 # ==============================================================================
@@ -1179,7 +1353,8 @@ class DownloadWorker(QObject):
             if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
                 self.log.emit(f"🔒 ERROR [{folder_display}] {file_display}: Password protected. Verify link password.")
             else:
-                self.log.emit(f"ERROR [{folder_display}] {file_display}: {exc}")
+                err_title, err_desc = parse_friendly_error(exc)
+                self.log.emit(f"❌ ERROR [{folder_display}] {file_display}: {err_title} ({err_desc.splitlines()[0]})")
 
     @Slot()
     def run(self):
@@ -1789,6 +1964,7 @@ class MainWindow(QMainWindow):
         self.recent_links: list[dict[str, Any]] = []
         self.is_download_paused: bool = False
         self._is_running: bool = False
+        self.current_root_name: str = ""
 
         self.auto_scan_timer = QTimer(self)
         self.auto_scan_timer.setSingleShot(True)
@@ -2080,11 +2256,12 @@ class MainWindow(QMainWindow):
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
         self.tree_widget.itemExpanded.connect(self.on_tree_item_expanded)
         self.tree_widget.itemCollapsed.connect(self.on_tree_item_collapsed)
-        self.tree_widget.currentItemChanged.connect(self.on_tree_current_item_changed)
+        self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree_widget.customContextMenuRequested.connect(self.show_tree_context_menu)
         tree_layout.addWidget(self.tree_widget)
         self.show_empty_tree_placeholder()
 
-        self.tree_hint = QLabel("💡 Tip: Click any folder to expand/collapse. Unchecked items will not be downloaded.")
+        self.tree_hint = QLabel("💡 Tip: Click or check any file to select it for download. Right-click any item for more options.")
         self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
         tree_layout.addWidget(self.tree_hint)
 
@@ -2355,7 +2532,9 @@ class MainWindow(QMainWindow):
             self.btn_expand_all.setEnabled(not active)
             self.btn_collapse_all.setEnabled(not active)
             if not active:
-                self.set_status_badge("● Ready", "ready")
+                curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
+                if not any(k in curr.lower() for k in ("completed", "error", "stopped")):
+                    self.set_status_badge("● Ready", "ready")
 
             # Refresh placeholder item if tree is in empty placeholder state
             if self.tree_widget.topLevelItemCount() == 1:
@@ -2462,10 +2641,36 @@ class MainWindow(QMainWindow):
         if not url or "dropbox.com" not in url:
             return
 
-        if not title:
-            parsed = urlparse(url)
-            path_parts = [p for p in parsed.path.split("/") if p]
-            title = path_parts[-1] if path_parts else "Dropbox Folder"
+        junk_titles = {"h", "fo", "fi", "sh", "scl", "dl", "dropbox folder", "dropboxfolder", ""}
+        clean_title = (title or "").strip()
+        if clean_title.lower() in junk_titles:
+            clean_title = ""
+
+        existing = next((item for item in self.recent_links if item.get("url") == url), None)
+
+        if not clean_title:
+            # 1. Prefer existing recent title if it has a real root folder name
+            if existing and existing.get("title") and existing.get("title").strip().lower() not in junk_titles:
+                clean_title = existing.get("title").strip()
+            # 2. Check current_root_name on MainWindow
+            elif hasattr(self, "current_root_name") and self.current_root_name and self.current_root_name.strip().lower() not in junk_titles:
+                clean_title = self.current_root_name.strip()
+            # 3. Check tree widget top item
+            elif hasattr(self, "tree_widget") and self.tree_widget.topLevelItemCount() > 0:
+                top = self.tree_widget.topLevelItem(0)
+                if top and top.data(0, Qt.ItemDataRole.UserRole) is not None:
+                    raw = top.data(3, Qt.ItemDataRole.UserRole) or ""
+                    if raw and raw.strip().lower() not in junk_titles:
+                        clean_title = raw.strip()
+            # 4. Try extracting folder name from URL path
+            if not clean_title:
+                clean_title = extract_folder_name_from_url(url)
+            # 5. Fallback
+            if not clean_title:
+                clean_title = "Dropbox Folder"
+
+        if item_count == 0 and existing and existing.get("item_count", 0) > 0:
+            item_count = existing.get("item_count", 0)
 
         now = time.time()
         date_str = time.strftime("%b %d, %H:%M", time.localtime(now))
@@ -2473,7 +2678,7 @@ class MainWindow(QMainWindow):
         filtered = [item for item in self.recent_links if item.get("url") != url]
         new_item = {
             "url": url,
-            "title": title,
+            "title": clean_title,
             "item_count": item_count,
             "timestamp": now,
             "date_str": date_str,
@@ -2509,14 +2714,14 @@ class MainWindow(QMainWindow):
 
         for item in self.recent_links[:4]:
             title = item.get("title") or "Dropbox Folder"
-            display_name = (title[:18] + "…") if len(title) > 20 else title
+            display_name = (title[:22] + "…") if len(title) > 24 else title
 
             chip_btn = QPushButton(f"📁 {display_name}")
             chip_btn.setProperty("class", "recent-chip")
             chip_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            tooltip_txt = f"{title}\n{item.get('url', '')}\nSaved: {item.get('date_str', '')}"
+            tooltip_txt = f"📁 Root Folder: {title}\n🔗 {item.get('url', '')}\n📅 Saved: {item.get('date_str', '')}"
             if item.get("item_count"):
-                tooltip_txt += f" ({item.get('item_count')} items)"
+                tooltip_txt += f"\n📊 {item.get('item_count')} items discovered"
             chip_btn.setToolTip(tooltip_txt)
 
             chip_url = item.get("url", "")
@@ -2548,8 +2753,8 @@ class MainWindow(QMainWindow):
                 title = item.get("title") or "Dropbox Folder"
                 url = item.get("url", "")
                 cnt = item.get("item_count")
-                cnt_txt = f" ({cnt} items)" if cnt else ""
-                date_txt = f" [{item.get('date_str', '')}]" if item.get("date_str") else ""
+                cnt_txt = f"  ({cnt} items)" if cnt else ""
+                date_txt = f"  •  {item.get('date_str', '')}" if item.get("date_str") else ""
                 short_url = url[:60] + ("..." if len(url) > 60 else "")
                 action_text = f"📁 {title}{cnt_txt}{date_txt}\n    {short_url}"
                 act = menu.addAction(action_text)
@@ -2568,7 +2773,14 @@ class MainWindow(QMainWindow):
         if not self.is_logged_in():
             self.prompt_login_required("load this link")
             return
+        if hasattr(self, "auto_scan_timer") and self.auto_scan_timer is not None:
+            self.auto_scan_timer.stop()
+        item = next((it for it in self.recent_links if it.get("url") == url), None)
+        if item and item.get("title"):
+            self.current_root_name = item.get("title")
+        self.url_input.blockSignals(True)
         self.url_input.setText(url)
+        self.url_input.blockSignals(False)
         self.start_scan()
 
     def clear_recent_links(self):
@@ -2598,8 +2810,15 @@ class MainWindow(QMainWindow):
         recent_raw = self.settings.value("recent_links_json", "")
         if recent_raw:
             try:
-                self.recent_links = json.loads(str(recent_raw))
-                if not isinstance(self.recent_links, list):
+                loaded = json.loads(str(recent_raw))
+                if isinstance(loaded, list):
+                    junk_titles = {"h", "fo", "fi", "sh", "scl", "dl", ""}
+                    for it in loaded:
+                        t = (it.get("title") or "").strip()
+                        if t.lower() in junk_titles:
+                            it["title"] = extract_folder_name_from_url(it.get("url", "")) or "Dropbox Folder"
+                    self.recent_links = loaded
+                else:
                     self.recent_links = []
             except Exception:
                 self.recent_links = []
@@ -2641,6 +2860,28 @@ class MainWindow(QMainWindow):
             self.verify_thread = None
         self.verify_worker = None
 
+    def cleanup_download_thread(self):
+        if self.download_thread is not None:
+            if self.worker:
+                self.worker.stop()
+            if self.download_thread.isRunning():
+                self.download_thread.quit()
+                self.download_thread.wait(3000)
+            self.download_thread = None
+        self.worker = None
+
+    def cleanup_scan_thread(self):
+        if hasattr(self, "auto_scan_timer") and self.auto_scan_timer is not None:
+            self.auto_scan_timer.stop()
+        if hasattr(self, "scan_worker") and self.scan_worker is not None:
+            self.scan_worker.cancel()
+        if hasattr(self, "scan_thread") and self.scan_thread is not None:
+            if self.scan_thread.isRunning():
+                self.scan_thread.quit()
+                self.scan_thread.wait(2000)
+            self.scan_thread = None
+        self.scan_worker = None
+
     @Slot(str, str)
     def on_verify_finished(self, name: str, email: str):
         self.cleanup_verify_thread()
@@ -2655,7 +2896,8 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def on_verify_expired(self, exc_msg: str):
         self.cleanup_verify_thread()
-        self.add_log(f"⚠ Saved session expired or invalid ({exc_msg}). Signing out...")
+        title, msg = parse_friendly_error(exc_msg)
+        self.add_log(f"⚠ Session expired: {msg.splitlines()[0]} Signing out...")
         self.current_access_token = ""
         self.current_refresh_token = ""
         self.current_user_name = ""
@@ -2666,7 +2908,8 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def on_verify_failed(self, exc_msg: str):
         self.cleanup_verify_thread()
-        self.add_log(f"⚠ Saved session could not be verified ({exc_msg}). Please sign in again if needed.")
+        title, msg = parse_friendly_error(exc_msg)
+        self.add_log(f"⚠ Session check: {msg.splitlines()[0]} Please sign in again if needed.")
 
     @Slot(str)
     def on_auth_status(self, msg: str):
@@ -2823,11 +3066,12 @@ class MainWindow(QMainWindow):
                     self.start_scan()
             elif loading_dialog.auth_error:
                 self.update_account_ui()
-                self.add_log(f"✕ Login failed: {loading_dialog.auth_error}")
+                title, friendly = parse_friendly_error(loading_dialog.auth_error)
+                self.add_log(f"✕ Login failed: {title} ({friendly.splitlines()[0]})")
                 ModernMessageBox.error(
                     self,
-                    "Login Failed",
-                    f"Could not complete Dropbox authorization:\n\n{loading_dialog.auth_error}",
+                    f"Login Failed: {title}",
+                    f"Could not complete Dropbox authorization:\n\n{friendly}",
                 )
             elif loading_dialog.is_cancelled:
                 self.update_account_ui()
@@ -2837,10 +3081,11 @@ class MainWindow(QMainWindow):
 
         except Exception as exc:
             self.update_account_ui()
+            title, friendly = parse_friendly_error(exc)
             ModernMessageBox.error(
                 self,
-                "Login Failed",
-                f"Could not initialize Dropbox authorization:\n\n{exc}",
+                f"Login Failed: {title}",
+                f"Could not initialize Dropbox authorization:\n\n{friendly}",
             )
 
     def logout_dropbox(self):
@@ -2877,6 +3122,7 @@ class MainWindow(QMainWindow):
             self.btn_toggle_log.setText("Hide Log")
 
     def show_empty_tree_placeholder(self):
+        self._updating_tree = True
         self.tree_widget.clear()
         if not self.is_logged_in():
             placeholder = QTreeWidgetItem(
@@ -2892,6 +3138,7 @@ class MainWindow(QMainWindow):
         placeholder.setForeground(0, QColor("#64748b"))
         placeholder.setForeground(1, QColor("#64748b"))
         placeholder.setForeground(2, QColor("#64748b"))
+        self._updating_tree = False
 
     def on_url_text_changed(self, text: str):
         self.update_download_button_state()
@@ -2908,10 +3155,14 @@ class MainWindow(QMainWindow):
         if not self.is_logged_in():
             self.prompt_login_required("paste and inspect shared links")
             return
+        if hasattr(self, "auto_scan_timer") and self.auto_scan_timer is not None:
+            self.auto_scan_timer.stop()
         clipboard = QApplication.clipboard()
         text = clipboard.text().strip()
         if text:
+            self.url_input.blockSignals(True)
             self.url_input.setText(text)
+            self.url_input.blockSignals(False)
             self.start_scan()
 
     def clear_url_and_tree(self):
@@ -2945,6 +3196,8 @@ class MainWindow(QMainWindow):
     # Folder Scanning & Tree Population
     # ==========================================================================
     def start_scan(self):
+        self.cleanup_scan_thread()
+
         if not self.is_logged_in():
             self.prompt_login_required("inspect folder contents")
             return
@@ -2953,7 +3206,7 @@ class MainWindow(QMainWindow):
         password = (self.link_password or "").strip()
 
         if not url:
-            ModernMessageBox.warning(self, "Missing URL", "Please enter or paste a valid Dropbox shared link.")
+            ModernMessageBox.warning(self, "Missing Link", "Please enter or paste a valid Dropbox shared link to inspect folders.")
             self.url_input.setFocus()
             return
 
@@ -2990,13 +3243,11 @@ class MainWindow(QMainWindow):
         self.set_selection_summary(f"⏳ {text}", "active")
 
     def on_scan_finished(self, tree_dict: dict, root_name: str, entries: list):
+        self.cleanup_scan_thread()
         self.btn_scan_url.setEnabled(True)
         self.btn_scan_url.setText("🔍 Load Folders")
 
-        if self.scan_thread:
-            self.scan_thread.quit()
-            self.scan_thread.wait()
-
+        self.current_root_name = root_name
         self._tree_items_data = entries
         self.populate_tree_widget(tree_dict, root_name)
 
@@ -3011,16 +3262,14 @@ class MainWindow(QMainWindow):
         self.update_download_button_state()
 
     def on_scan_failed(self, error: str):
+        self.cleanup_scan_thread()
         self.btn_scan_url.setEnabled(True)
         self.btn_scan_url.setText("🔍 Load Folders")
 
-        if self.scan_thread:
-            self.scan_thread.quit()
-            self.scan_thread.wait()
-
+        title, friendly_msg = parse_friendly_error(error)
         self.show_empty_tree_placeholder()
-        self.set_selection_summary("⚠️ Scan failed", "error")
-        self.add_log(f"⚠️ Scan error: {error}")
+        self.set_selection_summary(f"⚠️ {title}", "error")
+        self.add_log(f"⚠️ {title}: {friendly_msg.splitlines()[0]}")
         self.update_download_button_state()
 
         if "password" in error.lower() or "access_denied" in error.lower():
@@ -3040,11 +3289,8 @@ class MainWindow(QMainWindow):
                 self.link_password = pwd.strip()
                 self.start_scan()
                 return
-            else:
-                self.show_empty_tree_placeholder()
         else:
-            self.show_empty_tree_placeholder()
-            ModernMessageBox.warning(self, "Folder Scan Error", f"Could not inspect folders:\n\n{error}")
+            ModernMessageBox.warning(self, title, friendly_msg)
 
     def populate_tree_widget(self, tree_dict: dict, root_name: str):
         self._updating_tree = True
@@ -3113,6 +3359,89 @@ class MainWindow(QMainWindow):
             rect = self.tree_widget.visualItemRect(item)
             if column != 0 or pos.x() > (rect.x() + 24):
                 item.setExpanded(not item.isExpanded())
+        elif not is_dir:
+            pos = self.tree_widget.viewport().mapFromGlobal(QCursor.pos())
+            rect = self.tree_widget.visualItemRect(item)
+            if column != 0 or pos.x() > (rect.x() + 24):
+                current_state = item.checkState(0)
+                new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
+                item.setCheckState(0, new_state)
+
+    def show_tree_context_menu(self, point):
+        item = self.tree_widget.itemAt(point)
+        if not item or item.data(0, Qt.ItemDataRole.UserRole) is None:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #0c1424;
+                border: 1px solid #1e2d4a;
+                border-radius: 8px;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                color: #e2e8f0;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #1e293b;
+                margin: 4px 8px;
+            }
+        """)
+
+        is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
+        raw_name = item.data(3, Qt.ItemDataRole.UserRole) or item.text(0)
+
+        if not is_dir:
+            act_only = menu.addAction(f"🎯 Select Only '{raw_name}'")
+            is_checked = (item.checkState(0) == Qt.CheckState.Checked)
+            act_toggle = menu.addAction(f"☐ Deselect '{raw_name}'" if is_checked else f"☑ Select '{raw_name}'")
+            menu.addSeparator()
+            act_select_all = menu.addAction("☑ Select All")
+            act_deselect_all = menu.addAction("☐ Deselect All")
+
+            action = menu.exec(self.tree_widget.viewport().mapToGlobal(point))
+            if action == act_only:
+                self.deselect_all_items()
+                item.setCheckState(0, Qt.CheckState.Checked)
+            elif action == act_toggle:
+                new_state = Qt.CheckState.Unchecked if is_checked else Qt.CheckState.Checked
+                item.setCheckState(0, new_state)
+            elif action == act_select_all:
+                self.select_all_items()
+            elif action == act_deselect_all:
+                self.deselect_all_items()
+        else:
+            act_select_folder = menu.addAction(f"☑ Select All in '{raw_name}'")
+            act_deselect_folder = menu.addAction(f"☐ Deselect All in '{raw_name}'")
+            menu.addSeparator()
+            act_expand = menu.addAction("📂 Expand Folder")
+            act_collapse = menu.addAction("📁 Collapse Folder")
+            menu.addSeparator()
+            act_select_all = menu.addAction("☑ Select All")
+            act_deselect_all = menu.addAction("☐ Deselect All")
+
+            action = menu.exec(self.tree_widget.viewport().mapToGlobal(point))
+            if action == act_select_folder:
+                item.setCheckState(0, Qt.CheckState.Checked)
+            elif action == act_deselect_folder:
+                item.setCheckState(0, Qt.CheckState.Unchecked)
+            elif action == act_expand:
+                item.setExpanded(True)
+            elif action == act_collapse:
+                item.setExpanded(False)
+            elif action == act_select_all:
+                self.select_all_items()
+            elif action == act_deselect_all:
+                self.deselect_all_items()
 
     def on_tree_item_expanded(self, item: QTreeWidgetItem):
         is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
@@ -3361,15 +3690,19 @@ class MainWindow(QMainWindow):
         if running:
             self.set_status_badge("● Downloading...", "running")
         else:
-            if self.is_logged_in():
-                self.set_status_badge("● Ready", "ready")
-            else:
-                self.set_status_badge("○ Login Required", "neutral")
+            curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
+            if "completed" not in curr.lower():
+                if self.is_logged_in():
+                    self.set_status_badge("● Ready", "ready")
+                else:
+                    self.set_status_badge("○ Login Required", "neutral")
 
     def start_download(self):
         if not self.is_logged_in():
             self.prompt_login_required("download files")
             return
+
+        self.cleanup_download_thread()
 
         url = self.url_input.text().strip()
         destination = self.destination_input.text().strip()
@@ -3377,12 +3710,12 @@ class MainWindow(QMainWindow):
         link_password = (self.link_password or "").strip()
 
         if not url:
-            ModernMessageBox.warning(self, "Missing URL", "Please enter a Dropbox shared link.")
+            ModernMessageBox.warning(self, "Missing Link", "Please enter or paste a Dropbox shared link before downloading.")
             self.url_input.setFocus()
             return
 
         if not destination:
-            ModernMessageBox.warning(self, "Missing Destination", "Please choose a local save destination.")
+            ModernMessageBox.warning(self, "Missing Destination", "Please choose a local save destination folder before downloading.")
             return
 
         info = self.get_tree_selection_info()
@@ -3390,8 +3723,8 @@ class MainWindow(QMainWindow):
             if info["total_files"] > 0 and info["selected_file_count"] == 0:
                 ModernMessageBox.warning(
                     self,
-                    "No Items Selected",
-                    "All files in the tree are deselected.\n\n"
+                    "No Files Selected",
+                    "All files in the folder are currently deselected.\n\n"
                     "Please check at least one folder or file to download.",
                 )
                 return
@@ -3399,13 +3732,18 @@ class MainWindow(QMainWindow):
                 ModernMessageBox.warning(
                     self,
                     "No Items Selected",
-                    "All items in the tree are deselected.\n\n"
+                    "All items in the folder are currently deselected.\n\n"
                     "Please check at least one item to download.",
                 )
                 return
 
         self.save_settings()
-        self.add_recent_link(url, title="", item_count=info.get("selected_file_count", 0))
+        root_name = getattr(self, "current_root_name", "")
+        if not root_name and self.tree_widget.topLevelItemCount() > 0:
+            top = self.tree_widget.topLevelItem(0)
+            if top and top.data(0, Qt.ItemDataRole.UserRole) is not None:
+                root_name = top.data(3, Qt.ItemDataRole.UserRole) or ""
+        self.add_recent_link(url, title=root_name, item_count=info.get("selected_file_count", 0))
 
         self.file_progress.setValue(0)
         self.overall_progress.setValue(0)
@@ -3492,29 +3830,41 @@ class MainWindow(QMainWindow):
             self.set_status_badge("● Stopping...", "warning")
 
     def download_finished(self, message: str):
+        self.cleanup_download_thread()
         self.set_running(False)
         self.add_log(f"\n{message}")
         if "stopped" in message.lower() or "cancelled" in message.lower():
             self.set_status_badge("⏹ Stopped", "neutral")
             self.folder_label.setText("Stopped")
             self.file_label.setText("Download operation stopped")
+            self.val_speed.setText("0 B/s")
             ModernMessageBox.information(self, "Download Stopped", message)
         else:
-            self.set_status_badge("● Complete", "success")
-            ModernMessageBox.information(self, "Download Complete", message)
+            self.set_status_badge("● Completed", "success")
+            self.folder_label.setText("Completed")
+            self.file_label.setText("Download completed successfully")
+            self.overall_pct_label.setText("100%")
+            self.file_pct_label.setText("100%")
+            self.file_progress.setValue(100)
+            self.overall_progress.setValue(100)
+            self.val_speed.setText("0 B/s")
+            ModernMessageBox.information(self, "Download Completed", message)
 
-        if self.download_thread:
-            self.download_thread.quit()
-            self.download_thread.wait()
+        self.update_feature_enabled_state()
+        self.update_download_button_state()
 
     def download_failed(self, error: str):
+        self.cleanup_download_thread()
         self.set_running(False)
-        self.add_log(f"\n❌ FAILED: {error}")
-        self.set_status_badge("● Error", "error")
+        self.update_feature_enabled_state()
+        self.update_download_button_state()
 
-        if self.download_thread:
-            self.download_thread.quit()
-            self.download_thread.wait()
+        title, friendly_msg = parse_friendly_error(error)
+        self.add_log(f"\n❌ FAILED: {title} - {friendly_msg.splitlines()[0]}")
+        self.set_status_badge("● Error", "error")
+        self.folder_label.setText(title)
+        self.file_label.setText(friendly_msg.splitlines()[0])
+        self.val_speed.setText("0 B/s")
 
         if "password" in error.lower() or "access_denied" in error.lower():
             pwd, ok = ModernInputDialog.get_text(
@@ -3534,25 +3884,14 @@ class MainWindow(QMainWindow):
                 self.start_download()
                 return
 
-        ModernMessageBox.error(self, "Download Failed", error)
+        ModernMessageBox.error(self, title, friendly_msg)
 
     def closeEvent(self, event):
         self.save_settings()
-        if self.worker and self.download_thread and self.download_thread.isRunning():
-            self.worker.stop()
-            self.download_thread.quit()
-            self.download_thread.wait()
-        if self.scan_thread and self.scan_thread.isRunning():
-            self.scan_thread.quit()
-            self.scan_thread.wait()
-        if self.auth_thread and self.auth_thread.isRunning():
-            if self.auth_worker:
-                self.auth_worker.cancel()
-            self.auth_thread.quit()
-            self.auth_thread.wait(2000)
-        if self.verify_thread and self.verify_thread.isRunning():
-            self.verify_thread.quit()
-            self.verify_thread.wait(2000)
+        self.cleanup_download_thread()
+        self.cleanup_scan_thread()
+        self.cleanup_auth_thread()
+        self.cleanup_verify_thread()
         event.accept()
 
 
