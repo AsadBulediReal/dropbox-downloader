@@ -980,6 +980,11 @@ class AuthWorker(QObject):
         except Exception as exc:
             if not self._is_cancelled:
                 self.failed.emit(str(exc))
+        finally:
+            try:
+                QThread.currentThread().quit()
+            except Exception:
+                pass
 
 
 class SessionVerifyWorker(QObject):
@@ -1013,6 +1018,11 @@ class SessionVerifyWorker(QObject):
             self.expired.emit(str(exc))
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            try:
+                QThread.currentThread().quit()
+            except Exception:
+                pass
 
 
 # ==============================================================================
@@ -1145,6 +1155,11 @@ class ScanWorker(QObject):
         except Exception as exc:
             if not self._is_cancelled:
                 self.failed.emit(str(exc))
+        finally:
+            try:
+                QThread.currentThread().quit()
+            except Exception:
+                pass
 
 
 # ==============================================================================
@@ -1821,6 +1836,11 @@ class DownloadWorker(QObject):
 
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            try:
+                QThread.currentThread().quit()
+            except Exception:
+                pass
 
 
 # ==============================================================================
@@ -2303,6 +2323,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(DARK_STYLESHEET)
 
         self.settings = QSettings("DropboxDownloader", "RecursiveGUI")
+        self._active_workers: dict[QThread, QObject] = {}
         self.download_thread: QThread | None = None
         self.worker: DownloadWorker | None = None
         self.scan_thread: QThread | None = None
@@ -3264,46 +3285,43 @@ class MainWindow(QMainWindow):
             self.add_log("🔒 Welcome! Please sign into your Dropbox account above to unlock features.")
 
     def cleanup_auth_thread(self):
-        if self.auth_thread:
+        if self.auth_worker is not None:
+            self.auth_worker.cancel()
+        if self.auth_thread is not None:
             if self.auth_thread.isRunning():
                 self.auth_thread.quit()
-                self.auth_thread.wait(3000)
             self.auth_thread = None
         self.auth_worker = None
 
     def cleanup_verify_thread(self):
-        if self.verify_thread:
+        if self.verify_thread is not None:
             if self.verify_thread.isRunning():
                 self.verify_thread.quit()
-                self.verify_thread.wait(3000)
             self.verify_thread = None
         self.verify_worker = None
 
     def cleanup_download_thread(self):
+        if self.worker is not None:
+            self.worker.stop()
         if self.download_thread is not None:
-            if self.worker:
-                self.worker.stop()
             if self.download_thread.isRunning():
                 self.download_thread.quit()
-                self.download_thread.wait(3000)
             self.download_thread = None
         self.worker = None
 
     def cleanup_scan_thread(self):
         if hasattr(self, "auto_scan_timer") and self.auto_scan_timer is not None:
             self.auto_scan_timer.stop()
-        if hasattr(self, "scan_worker") and self.scan_worker is not None:
+        if self.scan_worker is not None:
             self.scan_worker.cancel()
-        if hasattr(self, "scan_thread") and self.scan_thread is not None:
+        if self.scan_thread is not None:
             if self.scan_thread.isRunning():
                 self.scan_thread.quit()
-                self.scan_thread.wait(2000)
             self.scan_thread = None
         self.scan_worker = None
 
     @Slot(str, str)
     def on_verify_finished(self, name: str, email: str):
-        self.cleanup_verify_thread()
         if name:
             self.current_user_name = name
         if email:
@@ -3314,7 +3332,6 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_verify_expired(self, exc_msg: str):
-        self.cleanup_verify_thread()
         title, msg = parse_friendly_error(exc_msg)
         self.add_log(f"⚠ Session expired: {msg.splitlines()[0]} Signing out...")
         self.current_access_token = ""
@@ -3326,7 +3343,6 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_verify_failed(self, exc_msg: str):
-        self.cleanup_verify_thread()
         title, msg = parse_friendly_error(exc_msg)
         self.add_log(f"⚠ Session check: {msg.splitlines()[0]} Please sign in again if needed.")
 
@@ -3339,20 +3355,31 @@ class MainWindow(QMainWindow):
             return
 
         self.cleanup_verify_thread()
-        self.verify_thread = QThread()
-        self.verify_worker = SessionVerifyWorker(
+        t = QThread()
+        w = SessionVerifyWorker(
             access_token=self.current_access_token,
             refresh_token=self.current_refresh_token,
             app_key=self.get_app_key(),
         )
-        self.verify_worker.moveToThread(self.verify_thread)
+        w.moveToThread(t)
 
-        self.verify_worker.finished.connect(self.on_verify_finished)
-        self.verify_worker.expired.connect(self.on_verify_expired)
-        self.verify_worker.failed.connect(self.on_verify_failed)
+        w.finished.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        w.expired.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        t.finished.connect(w.deleteLater)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
 
-        self.verify_thread.started.connect(self.verify_worker.run)
-        self.verify_thread.start()
+        self.verify_thread = t
+        self.verify_worker = w
+        self._active_workers[t] = w
+
+        w.finished.connect(self.on_verify_finished)
+        w.expired.connect(self.on_verify_expired)
+        w.failed.connect(self.on_verify_failed)
+
+        t.started.connect(w.run)
+        t.start()
 
     def save_settings(self):
         self.settings.setValue("destination", self.destination_input.text().strip())
@@ -3450,23 +3477,31 @@ class MainWindow(QMainWindow):
             self.btn_banner_login.setText("⏳ Signing in...")
 
             self.cleanup_auth_thread()
-            self.auth_thread = QThread()
-            self.auth_worker = AuthWorker(flow=flow, code=code, app_key=app_key)
-            self.auth_worker.moveToThread(self.auth_thread)
+            t = QThread()
+            w = AuthWorker(flow=flow, code=code, app_key=app_key)
+            w.moveToThread(t)
 
-            self.auth_worker.status.connect(loading_dialog.set_status)
-            self.auth_worker.status.connect(self.on_auth_status)
-            self.auth_worker.progress.connect(loading_dialog.set_progress)
-            self.auth_worker.finished.connect(loading_dialog.on_auth_finished)
-            self.auth_worker.failed.connect(loading_dialog.on_auth_failed)
-            loading_dialog.cancelled.connect(self.auth_worker.cancel)
+            w.finished.connect(t.quit, Qt.ConnectionType.DirectConnection)
+            w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
+            t.finished.connect(w.deleteLater)
+            t.finished.connect(t.deleteLater)
+            t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
 
-            self.auth_thread.started.connect(self.auth_worker.run)
-            QTimer.singleShot(20, self.auth_thread.start)
+            self.auth_thread = t
+            self.auth_worker = w
+            self._active_workers[t] = w
+
+            w.status.connect(loading_dialog.set_status)
+            w.status.connect(self.on_auth_status)
+            w.progress.connect(loading_dialog.set_progress)
+            w.finished.connect(loading_dialog.on_auth_finished)
+            w.failed.connect(loading_dialog.on_auth_failed)
+            loading_dialog.cancelled.connect(w.cancel)
+
+            t.started.connect(w.run)
+            QTimer.singleShot(20, t.start)
 
             loading_dialog.exec()
-
-            self.cleanup_auth_thread()
 
             if loading_dialog.auth_success:
                 self.current_access_token = loading_dialog.auth_data.get("access_token", "")
@@ -3647,29 +3682,38 @@ class MainWindow(QMainWindow):
 
         self.update_download_button_state()
 
-        self.scan_thread = QThread()
-        self.scan_worker = ScanWorker(
+        t = QThread()
+        w = ScanWorker(
             url=url,
             access_token=self.current_access_token,
             refresh_token=self.current_refresh_token,
             app_key=self.get_app_key(),
             password=password,
         )
-        self.scan_worker.moveToThread(self.scan_thread)
+        w.moveToThread(t)
 
-        self.scan_thread.started.connect(self.scan_worker.run)
-        self.scan_worker.status.connect(self.on_scan_status)
-        self.scan_worker.finished.connect(self.on_scan_finished)
-        self.scan_worker.failed.connect(self.on_scan_failed)
+        w.finished.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        t.finished.connect(w.deleteLater)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
 
-        self.scan_thread.start()
+        self.scan_thread = t
+        self.scan_worker = w
+        self._active_workers[t] = w
+
+        t.started.connect(w.run)
+        w.status.connect(self.on_scan_status)
+        w.finished.connect(self.on_scan_finished)
+        w.failed.connect(self.on_scan_failed)
+
+        t.start()
 
     @Slot(str)
     def on_scan_status(self, text: str):
         self.set_selection_summary(f"⏳ {text}", "active")
 
     def on_scan_finished(self, tree_dict: dict, root_name: str, entries: list):
-        self.cleanup_scan_thread()
         self.btn_scan_url.setEnabled(True)
         self.btn_scan_url.setText("🔍 Load Folders")
 
@@ -3688,7 +3732,6 @@ class MainWindow(QMainWindow):
         self.update_download_button_state()
 
     def on_scan_failed(self, error: str):
-        self.cleanup_scan_thread()
         self.btn_scan_url.setEnabled(True)
         self.btn_scan_url.setText("🔍 Load Folders")
 
@@ -4132,8 +4175,6 @@ class MainWindow(QMainWindow):
             self.prompt_login_required("download files")
             return
 
-        self.cleanup_download_thread()
-
         url = self.url_input.text().strip()
         destination = self.destination_input.text().strip()
         skip_existing = self.check_skip_existing.isChecked()
@@ -4201,8 +4242,9 @@ class MainWindow(QMainWindow):
         if info["has_tree_items"] and info["total_files"] > 0:
             self.add_log(f"📋 Selection: {info['selected_file_count']} of {info['total_files']} files selected for download.")
 
-        self.download_thread = QThread()
-        self.worker = DownloadWorker(
+        self.cleanup_download_thread()
+        t = QThread()
+        w = DownloadWorker(
             url=url,
             destination=destination,
             access_token=self.current_access_token,
@@ -4220,28 +4262,36 @@ class MainWindow(QMainWindow):
             verify_only=False,
         )
 
-        self.worker.moveToThread(self.download_thread)
-        self.download_thread.started.connect(self.worker.run)
+        w.moveToThread(t)
+        t.started.connect(w.run)
 
-        self.worker.log.connect(self.add_log)
-        self.worker.folder_changed.connect(self.folder_label.setText)
-        self.worker.file_changed.connect(self.file_label.setText)
-        self.worker.current_progress.connect(self.update_file_progress)
-        self.worker.overall_progress.connect(self.update_overall_progress)
-        self.worker.stats_changed.connect(self.update_stats)
-        self.worker.paused_signal.connect(self.on_download_paused_changed)
+        w.finished.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        t.finished.connect(w.deleteLater)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
 
-        self.worker.finished.connect(self.download_finished)
-        self.worker.failed.connect(self.download_failed)
+        self.download_thread = t
+        self.worker = w
+        self._active_workers[t] = w
 
-        self.download_thread.start()
+        w.log.connect(self.add_log)
+        w.folder_changed.connect(self.folder_label.setText)
+        w.file_changed.connect(self.file_label.setText)
+        w.current_progress.connect(self.update_file_progress)
+        w.overall_progress.connect(self.update_overall_progress)
+        w.stats_changed.connect(self.update_stats)
+        w.paused_signal.connect(self.on_download_paused_changed)
+
+        w.finished.connect(self.download_finished)
+        w.failed.connect(self.download_failed)
+
+        t.start()
 
     def start_verification_only(self):
         if not self.is_logged_in():
             self.prompt_login_required("verify downloaded files")
             return
-
-        self.cleanup_download_thread()
 
         url = self.url_input.text().strip()
         destination = self.destination_input.text().strip()
@@ -4290,8 +4340,9 @@ class MainWindow(QMainWindow):
 
         auto_repair = self.check_auto_repair.isChecked() if hasattr(self, "check_auto_repair") else True
 
-        self.download_thread = QThread()
-        self.worker = DownloadWorker(
+        self.cleanup_download_thread()
+        t = QThread()
+        w = DownloadWorker(
             url=url,
             destination=destination,
             access_token=self.current_access_token,
@@ -4309,21 +4360,31 @@ class MainWindow(QMainWindow):
             verify_only=True,
         )
 
-        self.worker.moveToThread(self.download_thread)
-        self.download_thread.started.connect(self.worker.run)
+        w.moveToThread(t)
+        t.started.connect(w.run)
 
-        self.worker.log.connect(self.add_log)
-        self.worker.folder_changed.connect(self.folder_label.setText)
-        self.worker.file_changed.connect(self.file_label.setText)
-        self.worker.current_progress.connect(self.update_file_progress)
-        self.worker.overall_progress.connect(self.update_overall_progress)
-        self.worker.stats_changed.connect(self.update_stats)
-        self.worker.paused_signal.connect(self.on_download_paused_changed)
+        w.finished.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
+        t.finished.connect(w.deleteLater)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
 
-        self.worker.finished.connect(self.download_finished)
-        self.worker.failed.connect(self.download_failed)
+        self.download_thread = t
+        self.worker = w
+        self._active_workers[t] = w
 
-        self.download_thread.start()
+        w.log.connect(self.add_log)
+        w.folder_changed.connect(self.folder_label.setText)
+        w.file_changed.connect(self.file_label.setText)
+        w.current_progress.connect(self.update_file_progress)
+        w.overall_progress.connect(self.update_overall_progress)
+        w.stats_changed.connect(self.update_stats)
+        w.paused_signal.connect(self.on_download_paused_changed)
+
+        w.finished.connect(self.download_finished)
+        w.failed.connect(self.download_failed)
+
+        t.start()
 
     def update_file_progress(self, val: int):
         self.file_progress.setValue(val)
@@ -4354,7 +4415,6 @@ class MainWindow(QMainWindow):
             self.set_status_badge("● Stopping...", "warning")
 
     def download_finished(self, message: str):
-        self.cleanup_download_thread()
         self.set_running(False)
         self.add_log(f"\n{message}")
 
@@ -4393,7 +4453,6 @@ class MainWindow(QMainWindow):
         self.update_download_button_state()
 
     def download_failed(self, error: str):
-        self.cleanup_download_thread()
         self.set_running(False)
         self.update_feature_enabled_state()
         self.update_download_button_state()
@@ -4431,6 +4490,18 @@ class MainWindow(QMainWindow):
         self.cleanup_scan_thread()
         self.cleanup_auth_thread()
         self.cleanup_verify_thread()
+
+        deadline = time.time() + 1.5
+        while getattr(self, "_active_workers", None) and time.time() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.02)
+
+        if hasattr(self, "_active_workers"):
+            for t in list(self._active_workers.keys()):
+                if t.isRunning():
+                    t.quit()
+                    t.wait(100)
+
         event.accept()
 
 
