@@ -32,7 +32,7 @@ except ImportError:
     shiboken6 = None
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QSettings, QTimer
-from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor
+from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QTreeWidget,
     QTreeWidgetItem,
+    QTreeWidgetItemIterator,
     QHeaderView,
     QInputDialog,
     QDialog,
@@ -2382,6 +2383,65 @@ class ModernLoadingDialog(QDialog):
 
 
 # ==============================================================================
+# Custom Tree Widget with Multi-Selection & Shift-Range Support
+# ==============================================================================
+class FileTreeWidget(QTreeWidget):
+    """
+    Enhanced QTreeWidget supporting:
+    - Extended multi-selection (Shift + Click, Ctrl + Click, Shift + Arrow keys)
+    - Shift-click range selection & batch checking
+    - Space key shortcut to toggle check states of selected items
+    """
+    shiftRangeRequested = Signal(object, object, bool)  # (anchor_item, target_item, is_checkbox)
+    spacePressed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self._anchor_item: QTreeWidgetItem | None = None
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_Space:
+            self.spacePressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        pos = event.position().toPoint()
+        item = self.itemAt(pos)
+        is_shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        is_ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and is_shift
+            and item is not None
+            and self._anchor_item is not None
+            and self._anchor_item != item
+            and self._anchor_item.treeWidget() is self
+        ):
+            rect = self.visualItemRect(item)
+            is_checkbox = (pos.x() <= (rect.x() + 24))
+            self.shiftRangeRequested.emit(self._anchor_item, item, is_checkbox)
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not is_shift and not is_ctrl:
+                if item is not None:
+                    self._anchor_item = item
+            elif is_ctrl and item is not None:
+                self._anchor_item = item
+
+        super().mousePressEvent(event)
+
+    def clear(self):
+        self._anchor_item = None
+        super().clear()
+
+
+# ==============================================================================
 # Main GUI Window
 # ==============================================================================
 class MainWindow(QMainWindow):
@@ -2717,7 +2777,7 @@ class MainWindow(QMainWindow):
         tree_header.addWidget(self.btn_collapse_all)
         tree_layout.addLayout(tree_header)
 
-        self.tree_widget = QTreeWidget()
+        self.tree_widget = FileTreeWidget()
         self.tree_widget.setHeaderLabels(["Name", "Type", "Size"])
         self.tree_widget.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree_widget.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -2729,12 +2789,15 @@ class MainWindow(QMainWindow):
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
         self.tree_widget.itemExpanded.connect(self.on_tree_item_expanded)
         self.tree_widget.itemCollapsed.connect(self.on_tree_item_collapsed)
+        self.tree_widget.shiftRangeRequested.connect(self.on_tree_shift_range_selected)
+        self.tree_widget.spacePressed.connect(self.on_tree_space_pressed)
+        self.tree_widget.currentItemChanged.connect(self.on_tree_current_item_changed)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.show_tree_context_menu)
         tree_layout.addWidget(self.tree_widget)
         self.show_empty_tree_placeholder()
 
-        self.tree_hint = QLabel("💡 Tip: Click or check any file to select it for download. Right-click any item for more options.")
+        self.tree_hint = QLabel("💡 Tip: Click or check files to select for download. Shift+Click to select a range. Space to toggle. Right-click for options.")
         self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
         tree_layout.addWidget(self.tree_hint)
 
@@ -3965,7 +4028,94 @@ class MainWindow(QMainWindow):
         self._updating_tree = False
         self.update_selection_summary()
 
+    def _get_tree_items_between(self, item1: QTreeWidgetItem, item2: QTreeWidgetItem) -> list[QTreeWidgetItem]:
+        """Return all visible tree items between item1 and item2 (inclusive) in top-to-bottom order."""
+        all_visible: list[QTreeWidgetItem] = []
+        it = QTreeWidgetItemIterator(self.tree_widget)
+        while it.value():
+            item = it.value()
+            parent = item.parent()
+            visible = not item.isHidden()
+            while visible and parent:
+                if not parent.isExpanded():
+                    visible = False
+                    break
+                parent = parent.parent()
+            if visible:
+                all_visible.append(item)
+            it += 1
+
+        try:
+            idx1 = all_visible.index(item1)
+            idx2 = all_visible.index(item2)
+        except ValueError:
+            return [item2]
+
+        start = min(idx1, idx2)
+        end = max(idx1, idx2)
+        return all_visible[start : end + 1]
+
+    def set_items_checked(self, items: list[QTreeWidgetItem], state: Qt.CheckState):
+        """Batch set check states on a list of items and propagate down/up properly."""
+        if not items:
+            return
+        self._updating_tree = True
+        try:
+            for it in items:
+                it.setCheckState(0, state)
+                if bool(it.data(1, Qt.ItemDataRole.UserRole)):
+                    self._propagate_check_down(it, state)
+            for it in items:
+                self._update_ancestors(it)
+        finally:
+            self._updating_tree = False
+        self.update_selection_summary()
+
+    def on_tree_shift_range_selected(self, anchor_item: QTreeWidgetItem, target_item: QTreeWidgetItem, is_checkbox: bool):
+        """Handle Shift+Click range selection and update check states & row highlights."""
+        items_range = self._get_tree_items_between(anchor_item, target_item)
+
+        if is_checkbox:
+            target_state = (
+                Qt.CheckState.Unchecked
+                if target_item.checkState(0) == Qt.CheckState.Checked
+                else Qt.CheckState.Checked
+            )
+        else:
+            if anchor_item.checkState(0) == Qt.CheckState.Checked:
+                target_state = Qt.CheckState.Checked
+            else:
+                target_state = (
+                    Qt.CheckState.Checked
+                    if target_item.checkState(0) == Qt.CheckState.Unchecked
+                    else Qt.CheckState.Unchecked
+                )
+
+        self.tree_widget.clearSelection()
+        for it in items_range:
+            it.setSelected(True)
+        self.tree_widget.setCurrentItem(target_item)
+
+        self.set_items_checked(items_range, target_state)
+
+    def on_tree_space_pressed(self):
+        """Toggle check states for all currently selected items in the tree view."""
+        selected = self.tree_widget.selectedItems()
+        if not selected:
+            curr = self.tree_widget.currentItem()
+            if curr:
+                selected = [curr]
+        if not selected:
+            return
+
+        has_unchecked = any(it.checkState(0) != Qt.CheckState.Checked for it in selected)
+        target_state = Qt.CheckState.Checked if has_unchecked else Qt.CheckState.Unchecked
+        self.set_items_checked(selected, target_state)
+
     def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+            return
+        self.tree_widget._anchor_item = item
         is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
         if is_dir and item.childCount() > 0:
             pos = self.tree_widget.viewport().mapFromGlobal(QCursor.pos())
@@ -4010,6 +4160,19 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        selected_items = self.tree_widget.selectedItems()
+        is_multi = len(selected_items) > 1 and item in selected_items
+
+        act_check_sel = None
+        act_uncheck_sel = None
+        act_only_sel = None
+
+        if is_multi:
+            act_check_sel = menu.addAction(f"☑ Check Selected ({len(selected_items)} items)")
+            act_uncheck_sel = menu.addAction(f"☐ Deselect Selected ({len(selected_items)} items)")
+            act_only_sel = menu.addAction(f"🎯 Select Only Selected ({len(selected_items)} items)")
+            menu.addSeparator()
+
         is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
         raw_name = item.data(3, Qt.ItemDataRole.UserRole) or item.text(0)
 
@@ -4022,7 +4185,14 @@ class MainWindow(QMainWindow):
             act_deselect_all = menu.addAction("☐ Deselect All")
 
             action = menu.exec(self.tree_widget.viewport().mapToGlobal(point))
-            if action == act_only:
+            if is_multi and action == act_check_sel:
+                self.set_items_checked(selected_items, Qt.CheckState.Checked)
+            elif is_multi and action == act_uncheck_sel:
+                self.set_items_checked(selected_items, Qt.CheckState.Unchecked)
+            elif is_multi and action == act_only_sel:
+                self.deselect_all_items()
+                self.set_items_checked(selected_items, Qt.CheckState.Checked)
+            elif action == act_only:
                 self.deselect_all_items()
                 item.setCheckState(0, Qt.CheckState.Checked)
             elif action == act_toggle:
@@ -4043,7 +4213,14 @@ class MainWindow(QMainWindow):
             act_deselect_all = menu.addAction("☐ Deselect All")
 
             action = menu.exec(self.tree_widget.viewport().mapToGlobal(point))
-            if action == act_select_folder:
+            if is_multi and action == act_check_sel:
+                self.set_items_checked(selected_items, Qt.CheckState.Checked)
+            elif is_multi and action == act_uncheck_sel:
+                self.set_items_checked(selected_items, Qt.CheckState.Unchecked)
+            elif is_multi and action == act_only_sel:
+                self.deselect_all_items()
+                self.set_items_checked(selected_items, Qt.CheckState.Checked)
+            elif action == act_select_folder:
                 item.setCheckState(0, Qt.CheckState.Checked)
             elif action == act_deselect_folder:
                 item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -4161,25 +4338,29 @@ class MainWindow(QMainWindow):
         self.update_selection_summary()
 
     def update_selection_summary(self):
-        total_items = 0
-        selected_items = 0
+        total_files = 0
+        selected_files = 0
+        total_folders = 0
+        selected_folders = 0
         selected_bytes = 0
 
         def count_recursive(item: QTreeWidgetItem | None):
-            nonlocal total_items, selected_items, selected_bytes
+            nonlocal total_files, selected_files, total_folders, selected_folders, selected_bytes
             if item is None or item.data(0, Qt.ItemDataRole.UserRole) is None:
                 return
-            total_items += 1
+            is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
             state = item.checkState(0)
-            is_dir = item.data(1, Qt.ItemDataRole.UserRole)
             size = int(item.data(2, Qt.ItemDataRole.UserRole) or 0)
 
-            if state == Qt.CheckState.Checked:
-                selected_items += 1
-                if not is_dir:
+            if is_dir:
+                total_folders += 1
+                if state in (Qt.CheckState.Checked, Qt.CheckState.PartiallyChecked):
+                    selected_folders += 1
+            else:
+                total_files += 1
+                if state == Qt.CheckState.Checked:
+                    selected_files += 1
                     selected_bytes += size
-            elif state == Qt.CheckState.PartiallyChecked:
-                selected_items += 1
 
             for i in range(item.childCount()):
                 count_recursive(item.child(i))
@@ -4187,15 +4368,22 @@ class MainWindow(QMainWindow):
         for i in range(self.tree_widget.topLevelItemCount()):
             count_recursive(self.tree_widget.topLevelItem(i))
 
-        if total_items == 0:
+        if total_files == 0 and total_folders == 0:
             self.selection_summary_label.setText("(No items scanned yet)")
             self.selection_summary_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        elif total_files == 0:
+            folder_str = f"{selected_folders} of {total_folders} folder{'s' if total_folders != 1 else ''} selected"
+            self.selection_summary_label.setText(folder_str)
+            color = "#10b981" if selected_folders > 0 else "#94a3b8"
+            self.selection_summary_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")
         else:
-            summary_txt = f"{selected_items} of {total_items} items selected"
+            folder_str = f" ({selected_folders} folder{'s' if selected_folders != 1 else ''})" if selected_folders > 0 else ""
+            summary_txt = f"{selected_files} of {total_files} file{'s' if total_files != 1 else ''} selected{folder_str}"
             if selected_bytes > 0:
                 summary_txt += f" • {format_bytes(selected_bytes)}"
             self.selection_summary_label.setText(summary_txt)
-            self.selection_summary_label.setStyleSheet("font-size: 11px; color: #10b981; font-weight: 600;")
+            color = "#10b981" if selected_files > 0 or selected_folders > 0 else "#94a3b8"
+            self.selection_summary_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")
 
         self.update_download_button_state()
 
