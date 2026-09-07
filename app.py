@@ -26,6 +26,11 @@ try:
 except ImportError:
     DropboxContentHasher = None
 
+try:
+    import shiboken6
+except ImportError:
+    shiboken6 = None
+
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QSettings, QTimer
 from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor
 from PySide6.QtWidgets import (
@@ -664,6 +669,22 @@ def parse_friendly_error(error: Any) -> tuple[str, str]:
     )
 
 
+def is_thread_running(thread: Any) -> bool:
+    """Safely check if a QThread is running, guarding against deleted C++ wrapper objects."""
+    if thread is None:
+        return False
+    if shiboken6 is not None:
+        try:
+            if not shiboken6.isValid(thread):
+                return False
+        except Exception:
+            return False
+    try:
+        return bool(thread.isRunning())
+    except (RuntimeError, Exception):
+        return False
+
+
 def safe_local_path(root: Path, relative_path: str) -> Path:
     normalized = relative_path.replace("\\", "/").strip("/")
     parts = []
@@ -681,6 +702,46 @@ def safe_local_path(root: Path, relative_path: str) -> Path:
     except ValueError:
         raise ValueError(f"Unsafe Dropbox path: {relative_path}")
     return destination
+
+
+def resolve_download_root(destination: Path | str, root_name: str, raw_root_name: str = "") -> tuple[Path, bool]:
+    """
+    Determine the local root directory for saving files.
+    If the selected destination folder already has the same name as the Dropbox folder,
+    download directly into that folder (does not create a duplicate nested root folder).
+    Otherwise, creates/returns a subfolder named root_name inside destination.
+
+    Returns:
+        (resolved_root_path, is_same_folder)
+    """
+    dest_path = Path(destination)
+    clean_root = sanitize_filename(root_name) if root_name else ""
+    if not clean_root:
+        clean_root = "DropboxFolder"
+
+    dest_folder_name = dest_path.resolve().name if dest_path.is_absolute() else dest_path.name
+    dest_folder_name = dest_folder_name.strip()
+
+    clean_root_lower = clean_root.strip().lower()
+    raw_root_lower = (raw_root_name.strip().lower() if raw_root_name else clean_root_lower)
+    dest_lower = dest_folder_name.lower()
+    dest_sanitized_lower = sanitize_filename(dest_folder_name).strip().lower()
+
+    # Check if selected folder name matches Dropbox folder name (case-insensitive)
+    is_same = bool(
+        dest_lower
+        and (
+            dest_lower == clean_root_lower
+            or dest_lower == raw_root_lower
+            or dest_sanitized_lower == clean_root_lower
+            or dest_sanitized_lower == raw_root_lower
+        )
+    )
+
+    if is_same:
+        return dest_path, True
+
+    return safe_local_path(dest_path, clean_root), False
 
 
 def relative_path(entry: Any) -> str:
@@ -1521,11 +1582,18 @@ class DownloadWorker(QObject):
                     )
                 raise
 
-            root_name = sanitize_filename(root_name) or "DropboxFolder"
-            local_root = safe_local_path(self.destination, root_name)
+            raw_root_name = getattr(metadata, "name", None) or "DropboxFolder"
+            root_name = sanitize_filename(raw_root_name) or "DropboxFolder"
+            local_root, is_same_folder = resolve_download_root(self.destination, root_name, raw_root_name)
             local_root.mkdir(parents=True, exist_ok=True)
 
-            self.log.emit(f"📁 Destination folder: {local_root}")
+            if is_same_folder:
+                self.log.emit(
+                    f"📁 Target folder matches Dropbox folder '{root_name}'.\n"
+                    f"   Downloading contents directly into: {local_root} (no duplicate root folder created)"
+                )
+            else:
+                self.log.emit(f"📁 Destination folder: {local_root}")
             self.log.emit("🔍 Querying Dropbox hierarchy...")
 
             shared_link = SharedLink(
@@ -1542,13 +1610,16 @@ class DownloadWorker(QObject):
             # Filter files by user selection in tree
             all_discovered = list(self.files)
             filtered_files: list[DownloadFileItem] = []
+            deselected_count = 0
             for entry in all_discovered:
                 rel = getattr(entry, "rel_path", None) or getattr(entry, "_custom_rel_path", None) or relative_path(entry)
                 if self.is_selected(rel):
                     filtered_files.append(entry)
                 else:
-                    self.skipped += 1
-                    self.log.emit(f"SKIP  {rel} (deselected in tree)")
+                    deselected_count += 1
+
+            if deselected_count > 0:
+                self.log.emit(f"ℹ Excluded {deselected_count} unselected file(s) from download.")
 
             # Sort all selected files strictly in natural hierarchical order
             filtered_files.sort(key=natural_sort_path_key)
@@ -2568,6 +2639,12 @@ class MainWindow(QMainWindow):
         dest_row.setSpacing(6)
         self.destination_input = QLineEdit()
         self.destination_input.setText(str(Path.home() / "Downloads"))
+        self.destination_input.setPlaceholderText("Select local folder to save files...")
+        self.destination_input.setToolTip(
+            "Target folder for downloads.\n"
+            "If the selected folder has the same name as the Dropbox folder, "
+            "files will download directly into it without creating an extra root folder."
+        )
 
         self.btn_browse = QPushButton("📁 Browse...")
         self.btn_browse.setFixedWidth(105)
@@ -2890,8 +2967,8 @@ class MainWindow(QMainWindow):
             return
 
         logged_in = self.is_logged_in()
-        is_running = self._is_running or (self.download_thread is not None and self.download_thread.isRunning())
-        is_scanning = self.scan_thread is not None and self.scan_thread.isRunning()
+        is_running = self._is_running or is_thread_running(self.download_thread)
+        is_scanning = is_thread_running(self.scan_thread)
 
         if not logged_in:
             # Strictly disable all operational features until user signs in
@@ -2971,8 +3048,8 @@ class MainWindow(QMainWindow):
             return
 
         logged_in = self.is_logged_in()
-        is_running = self._is_running or (self.download_thread is not None and self.download_thread.isRunning())
-        is_scanning = self.scan_thread is not None and self.scan_thread.isRunning()
+        is_running = self._is_running or is_thread_running(self.download_thread)
+        is_scanning = is_thread_running(self.scan_thread)
 
         if is_running:
             self.start_button.setVisible(False)
@@ -3286,39 +3363,68 @@ class MainWindow(QMainWindow):
 
     def cleanup_auth_thread(self):
         if self.auth_worker is not None:
-            self.auth_worker.cancel()
+            try:
+                self.auth_worker.cancel()
+            except Exception:
+                pass
+            self.auth_worker = None
         if self.auth_thread is not None:
-            if self.auth_thread.isRunning():
-                self.auth_thread.quit()
+            if is_thread_running(self.auth_thread):
+                try:
+                    self.auth_thread.quit()
+                    self.auth_thread.wait(200)
+                except Exception:
+                    pass
             self.auth_thread = None
-        self.auth_worker = None
 
     def cleanup_verify_thread(self):
+        if self.verify_worker is not None:
+            self.verify_worker = None
         if self.verify_thread is not None:
-            if self.verify_thread.isRunning():
-                self.verify_thread.quit()
+            if is_thread_running(self.verify_thread):
+                try:
+                    self.verify_thread.quit()
+                    self.verify_thread.wait(200)
+                except Exception:
+                    pass
             self.verify_thread = None
-        self.verify_worker = None
 
     def cleanup_download_thread(self):
         if self.worker is not None:
-            self.worker.stop()
+            try:
+                self.worker.stop()
+            except Exception:
+                pass
+            self.worker = None
         if self.download_thread is not None:
-            if self.download_thread.isRunning():
-                self.download_thread.quit()
+            if is_thread_running(self.download_thread):
+                try:
+                    self.download_thread.quit()
+                    self.download_thread.wait(200)
+                except Exception:
+                    pass
             self.download_thread = None
-        self.worker = None
 
     def cleanup_scan_thread(self):
         if hasattr(self, "auto_scan_timer") and self.auto_scan_timer is not None:
-            self.auto_scan_timer.stop()
+            try:
+                self.auto_scan_timer.stop()
+            except Exception:
+                pass
         if self.scan_worker is not None:
-            self.scan_worker.cancel()
+            try:
+                self.scan_worker.cancel()
+            except Exception:
+                pass
+            self.scan_worker = None
         if self.scan_thread is not None:
-            if self.scan_thread.isRunning():
-                self.scan_thread.quit()
+            if is_thread_running(self.scan_thread):
+                try:
+                    self.scan_thread.quit()
+                    self.scan_thread.wait(200)
+                except Exception:
+                    pass
             self.scan_thread = None
-        self.scan_worker = None
 
     @Slot(str, str)
     def on_verify_finished(self, name: str, email: str):
@@ -3368,7 +3474,14 @@ class MainWindow(QMainWindow):
         w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
         t.finished.connect(w.deleteLater)
         t.finished.connect(t.deleteLater)
-        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
+
+        def _on_session_verify_thread_finished(thread_ref=t):
+            if getattr(self, "verify_thread", None) is thread_ref:
+                self.verify_thread = None
+                self.verify_worker = None
+            self._active_workers.pop(thread_ref, None)
+
+        t.finished.connect(_on_session_verify_thread_finished)
 
         self.verify_thread = t
         self.verify_worker = w
@@ -3485,7 +3598,14 @@ class MainWindow(QMainWindow):
             w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
             t.finished.connect(w.deleteLater)
             t.finished.connect(t.deleteLater)
-            t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
+
+            def _on_auth_thread_finished(thread_ref=t):
+                if getattr(self, "auth_thread", None) is thread_ref:
+                    self.auth_thread = None
+                    self.auth_worker = None
+                self._active_workers.pop(thread_ref, None)
+
+            t.finished.connect(_on_auth_thread_finished)
 
             self.auth_thread = t
             self.auth_worker = w
@@ -3519,7 +3639,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(
                     2500,
                     lambda: self.set_status_badge("● Ready", "ready")
-                    if self.is_logged_in() and not (self.download_thread and self.download_thread.isRunning())
+                    if self.is_logged_in() and not is_thread_running(self.download_thread)
                     else None,
                 )
 
@@ -3648,7 +3768,20 @@ class MainWindow(QMainWindow):
 
     def open_destination_folder(self):
         dest = self.destination_input.text().strip()
-        if dest and os.path.exists(dest):
+        if not dest:
+            ModernMessageBox.information(self, "Notice", "Download destination folder does not exist yet.")
+            return
+
+        target_path = Path(dest)
+        root_name = getattr(self, "current_root_name", "")
+        if root_name:
+            resolved_target, _ = resolve_download_root(target_path, root_name)
+            if resolved_target.exists():
+                target_path = resolved_target
+
+        if target_path.exists():
+            os.startfile(str(target_path))
+        elif Path(dest).exists():
             os.startfile(dest)
         else:
             ModernMessageBox.information(self, "Notice", "Download destination folder does not exist yet.")
@@ -3696,7 +3829,14 @@ class MainWindow(QMainWindow):
         w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
         t.finished.connect(w.deleteLater)
         t.finished.connect(t.deleteLater)
-        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
+
+        def _on_scan_thread_finished(thread_ref=t):
+            if getattr(self, "scan_thread", None) is thread_ref:
+                self.scan_thread = None
+                self.scan_worker = None
+            self._active_workers.pop(thread_ref, None)
+
+        t.finished.connect(_on_scan_thread_finished)
 
         self.scan_thread = t
         self.scan_worker = w
@@ -3714,6 +3854,8 @@ class MainWindow(QMainWindow):
         self.set_selection_summary(f"⏳ {text}", "active")
 
     def on_scan_finished(self, tree_dict: dict, root_name: str, entries: list):
+        self.scan_thread = None
+        self.scan_worker = None
         self.btn_scan_url.setEnabled(True)
         self.btn_scan_url.setText("🔍 Load Folders")
 
@@ -3732,6 +3874,8 @@ class MainWindow(QMainWindow):
         self.update_download_button_state()
 
     def on_scan_failed(self, error: str):
+        self.scan_thread = None
+        self.scan_worker = None
         self.btn_scan_url.setEnabled(True)
         self.btn_scan_url.setText("🔍 Load Folders")
 
@@ -4269,7 +4413,14 @@ class MainWindow(QMainWindow):
         w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
         t.finished.connect(w.deleteLater)
         t.finished.connect(t.deleteLater)
-        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
+
+        def _on_download_thread_finished(thread_ref=t):
+            if getattr(self, "download_thread", None) is thread_ref:
+                self.download_thread = None
+                self.worker = None
+            self._active_workers.pop(thread_ref, None)
+
+        t.finished.connect(_on_download_thread_finished)
 
         self.download_thread = t
         self.worker = w
@@ -4367,7 +4518,14 @@ class MainWindow(QMainWindow):
         w.failed.connect(t.quit, Qt.ConnectionType.DirectConnection)
         t.finished.connect(w.deleteLater)
         t.finished.connect(t.deleteLater)
-        t.finished.connect(lambda t=t: self._active_workers.pop(t, None))
+
+        def _on_verify_download_thread_finished(thread_ref=t):
+            if getattr(self, "download_thread", None) is thread_ref:
+                self.download_thread = None
+                self.worker = None
+            self._active_workers.pop(thread_ref, None)
+
+        t.finished.connect(_on_verify_download_thread_finished)
 
         self.download_thread = t
         self.worker = w
@@ -4415,6 +4573,7 @@ class MainWindow(QMainWindow):
             self.set_status_badge("● Stopping...", "warning")
 
     def download_finished(self, message: str):
+        self.download_thread = None
         self.set_running(False)
         self.add_log(f"\n{message}")
 
@@ -4453,6 +4612,7 @@ class MainWindow(QMainWindow):
         self.update_download_button_state()
 
     def download_failed(self, error: str):
+        self.download_thread = None
         self.set_running(False)
         self.update_feature_enabled_state()
         self.update_download_button_state()
@@ -4498,9 +4658,12 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "_active_workers"):
             for t in list(self._active_workers.keys()):
-                if t.isRunning():
-                    t.quit()
-                    t.wait(100)
+                if is_thread_running(t):
+                    try:
+                        t.quit()
+                        t.wait(100)
+                    except Exception:
+                        pass
 
         event.accept()
 
