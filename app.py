@@ -710,6 +710,23 @@ def get_file_type_and_icon(filename: str) -> tuple[str, str]:
         return f"{ext[1:].upper()} File" if ext else "File", "📄 "
 
 
+def natural_sort_key(s: str) -> list[int | str]:
+    """Sort strings containing numbers in natural human order (e.g. 1, 2, 10 instead of 1, 10, 2)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+
+def natural_sort_path_key(item: Any) -> list:
+    """Extract and split relative path into natural sort tokens for hierarchical order."""
+    rel = getattr(item, "rel_path", None) or getattr(item, "_custom_rel_path", None) or ""
+    if not rel and isinstance(item, dict):
+        rel = item.get("rel_path") or item.get("path") or ""
+    elif not rel and hasattr(item, "path_display"):
+        rel = getattr(item, "path_display") or ""
+    clean = str(rel).replace("\\", "/").strip("/")
+    parts = [p for p in clean.split("/") if p] if clean else [getattr(item, "name", "")]
+    return [natural_sort_key(part) for part in parts]
+
+
 def build_tree_hierarchy(entries: list, root_name: str = "DropboxFolder") -> dict[str, Any]:
     root: dict[str, Any] = {
         "name": root_name,
@@ -1256,7 +1273,7 @@ class DownloadWorker(QObject):
                 sub_api = f"{api_path}/{entry.name}" if api_path else f"/{entry.name}"
                 self.collect(dbx, shared_link, api_path=sub_api, rel_dir=sub_rel)
 
-    def download_one(self, dbx: dropbox.Dropbox, entry: Any, local_root: Path):
+    def download_one(self, dbx: dropbox.Dropbox, entry: Any, local_root: Path, total_files: int | None = None):
         if isinstance(entry, DownloadFileItem):
             rel = entry.rel_path
             api_path = entry.api_path
@@ -1329,10 +1346,11 @@ class DownloadWorker(QObject):
                         speed_str = f"{format_bytes(int(speed))}/s"
 
                     active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
+                    total_count = total_files if total_files is not None else len(self.files)
                     self.stats_changed.emit({
                         "speed": speed_str,
                         "data": f"{format_bytes(self.bytes_done + downloaded)}",
-                        "files": f"{self.done + 1}/{len(self.files)} files",
+                        "files": f"{min(self.done + self.skipped + 1, total_count)}/{total_count} files",
                         "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
                     })
 
@@ -1346,6 +1364,14 @@ class DownloadWorker(QObject):
             self.bytes_done += actual
             self.current_progress.emit(100)
             self.log.emit(f"DONE  [{folder_display}] {file_display}")
+            active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
+            total_count = total_files if total_files is not None else len(self.files)
+            self.stats_changed.emit({
+                "speed": "0 B/s",
+                "data": f"{format_bytes(self.bytes_done)}",
+                "files": f"{min(self.done + self.skipped, total_count)}/{total_count} files",
+                "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
+            })
 
         except Exception as exc:
             temp_file.unlink(missing_ok=True)
@@ -1424,23 +1450,109 @@ class DownloadWorker(QObject):
                     self.skipped += 1
                     self.log.emit(f"SKIP  {rel} (deselected in tree)")
 
+            # Sort all selected files strictly in natural hierarchical order
+            filtered_files.sort(key=natural_sort_path_key)
             self.files = filtered_files
-            self.log.emit(f"✓ Selected {len(self.files)} of {len(all_discovered)} file(s) to download.")
-            self.log.emit("🚀 Starting direct selective download...")
+            total_selected = len(self.files)
 
-            for index, entry in enumerate(self.files, start=1):
+            self.log.emit(f"✓ Selected {total_selected} of {len(all_discovered)} file(s) to download.")
+
+            files_to_download: list[DownloadFileItem] = list(self.files)
+
+            if self.skip_existing and total_selected > 0:
+                # Check if the system finds at least one already existing file
+                first_existing: DownloadFileItem | None = None
+                for entry in self.files:
+                    loc = safe_local_path(local_root, entry.rel_path)
+                    if loc.exists() and loc.is_file() and loc.stat().st_size == entry.size:
+                        first_existing = entry
+                        break
+
+                if first_existing is not None:
+                    first_clean = first_existing.rel_path.replace("\\", "/").strip("/")
+                    first_folder = Path(first_clean).parent.as_posix() if "/" in first_clean else "/ (Root)"
+                    self.log.emit(
+                        f"🔍 Existing file detected: [{first_folder}] {first_existing.name}\n"
+                        f"⚡ Scanning all {total_selected} file(s) to check for more existing files..."
+                    )
+
+                    existing_items: list[DownloadFileItem] = []
+                    remaining_items: list[DownloadFileItem] = []
+
+                    for entry in self.files:
+                        self._check_pause()
+                        if self.stop_requested:
+                            self.finished.emit("Download stopped.")
+                            return
+
+                        loc = safe_local_path(local_root, entry.rel_path)
+                        if loc.exists() and loc.is_file() and loc.stat().st_size == entry.size:
+                            existing_items.append(entry)
+                            self.skipped += 1
+                            self.bytes_done += entry.size
+                            rel_clean = entry.rel_path.replace("\\", "/").strip("/")
+                            folder_display = Path(rel_clean).parent.as_posix() if "/" in rel_clean else "/ (Root)"
+                            self.log.emit(f"SKIP  [{folder_display}] {entry.name} (already exists)")
+                        else:
+                            remaining_items.append(entry)
+
+                    existing_bytes = sum(it.size for it in existing_items)
+                    self.log.emit(
+                        f"✓ Local scan completed: Found {len(existing_items)} existing file(s) ({format_bytes(existing_bytes)}).\n"
+                        f"🚀 Downloading remaining {len(remaining_items)} file(s) in sequential order..."
+                    )
+
+                    # Update UI progress and stats with scanned existing items
+                    if total_selected > 0:
+                        self.overall_progress.emit(int(len(existing_items) * 100 / total_selected))
+
+                    active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
+                    self.stats_changed.emit({
+                        "speed": "0 B/s",
+                        "data": f"{format_bytes(self.bytes_done)}",
+                        "files": f"{self.skipped}/{total_selected} files",
+                        "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
+                    })
+
+                    files_to_download = remaining_items
+                else:
+                    self.log.emit("🚀 Starting direct selective download in sequential order...")
+            else:
+                self.log.emit("🚀 Starting direct selective download in sequential order...")
+
+            if not files_to_download and total_selected > 0:
+                elapsed = max(time.time() - self.started - self.paused_duration, 0.1)
+                self.overall_progress.emit(100)
+                self.current_progress.emit(100)
+                message = (
+                    f"✓ Download Finished: All files already exist locally!\n\n"
+                    f"Files Selected: {total_selected}\n"
+                    f"Completed: 0 (Already downloaded)\n"
+                    f"Skipped: {self.skipped}\n"
+                    f"Errors: {self.errors}\n"
+                    f"Data Transferred: {format_bytes(self.bytes_done)}\n"
+                    f"Time Elapsed: {elapsed:.1f}s\n"
+                    f"Output Directory: {local_root}"
+                )
+                self.finished.emit(message)
+                return
+
+            initial_offset = total_selected - len(files_to_download)
+
+            for index, entry in enumerate(files_to_download, start=1):
                 self._check_pause()
                 if self.stop_requested:
                     break
 
+                current_index = initial_offset + index
                 self.overall_progress.emit(
-                    int((index - 1) * 100 / max(len(self.files), 1))
+                    int((current_index - 1) * 100 / max(total_selected, 1))
                 )
 
-                self.download_one(dbx, entry, local_root)
+                self.download_one(dbx, entry, local_root, total_files=total_selected)
 
                 self.overall_progress.emit(
-                    int(index * 100 / max(len(self.files), 1))
+                    int(current_index * 100 / max(total_selected, 1))
                 )
 
             elapsed = max(time.time() - self.started - self.paused_duration, 0.1)
@@ -1450,7 +1562,7 @@ class DownloadWorker(QObject):
             else:
                 message = (
                     f"✓ Download Finished Successfully!\n\n"
-                    f"Files Selected: {len(self.files)}\n"
+                    f"Files Selected: {total_selected}\n"
                     f"Completed: {self.done}\n"
                     f"Skipped: {self.skipped}\n"
                     f"Errors: {self.errors}\n"
@@ -3327,14 +3439,14 @@ class MainWindow(QMainWindow):
 
             for child_name, child_data in sorted(
                 node_data["children"].items(),
-                key=lambda x: (not x[1]["is_dir"], x[0].lower())
+                key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
             ):
                 add_item_recursive(item, child_data)
 
         if tree_dict["children"]:
             for child_name, child_data in sorted(
                 tree_dict["children"].items(),
-                key=lambda x: (not x[1]["is_dir"], x[0].lower())
+                key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
             ):
                 add_item_recursive(None, child_data)
         else:

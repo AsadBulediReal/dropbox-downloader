@@ -70,8 +70,9 @@ When you open the app:
 - **Smart Action State**: Dynamically enables and disables download buttons based on item selection, valid destination paths, and active connection status.
 - **Interactive Directory Tree**: Expand/collapse folders, view item counts, formatted file sizes, file type icons, and right-click context menu for batch selecting or expanding subfolders.
 - **Human-Friendly Error Guidance**: Clear, contextual error dialogs explaining link expirations, network interruptions, access permissions, and password requirements with actionable steps.
+- **Smart Skip & Existing File Auto-Scan**: If an existing local file is detected, the system immediately scans the entire queue to identify and skip all other already downloaded files, instantly updating progress bars and transfer statistics before downloading the remaining files.
+- **Natural Sequential Order**: Files and subfolders are strictly sorted and downloaded in natural human order (e.g. `01`, `02`, `10` instead of alphabetical `01`, `10`, `02`) both in the interactive folder tree and in the active download queue.
 - **Live Metrics Dashboard**: Real-time download speed (MB/s), bytes transferred, files completed, and elapsed time.
 - **Dual Progress Bars**: Individual file progress and overall batch progress with 100% completion confirmation.
-- **Smart Skip**: Skips files that already exist locally with matching file size.
 - **Activity Log**: Searchable and filterable log console with one-click copy and clear.
 - **Safe & Resilient**: Graceful cancellation, thread lifecycle management, temporary download files, and path sanitization.
