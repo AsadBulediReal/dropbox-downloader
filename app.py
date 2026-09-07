@@ -1,0 +1,2555 @@
+import os
+import sys
+import time
+import re
+import webbrowser
+from pathlib import Path
+from urllib.parse import urlparse
+from typing import Any
+from dataclasses import dataclass
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+import dropbox
+from dropbox.files import FileMetadata, FolderMetadata, SharedLink
+from dropbox.exceptions import ApiError, AuthError
+
+from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QSettings, QTimer
+from PySide6.QtGui import QFont, QTextCursor, QCursor
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+    QFrame,
+    QGridLayout,
+    QCheckBox,
+    QScrollArea,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QHeaderView,
+    QInputDialog,
+    QDialog,
+)
+
+
+DARK_STYLESHEET = """
+QMainWindow {
+    background-color: #0a0f1d;
+    color: #f1f5f9;
+}
+QWidget {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #e2e8f0;
+}
+QDialog {
+    background-color: #0c1322;
+    color: #f8fafc;
+}
+QMessageBox {
+    background-color: #0c1322;
+    color: #f8fafc;
+}
+QMessageBox QLabel {
+    color: #cbd5e1;
+    font-size: 13px;
+    background-color: transparent;
+}
+QMessageBox QPushButton {
+    min-width: 82px;
+    padding: 7px 18px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 6px;
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    color: #e2e8f0;
+}
+QMessageBox QPushButton:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+    color: #ffffff;
+}
+QMessageBox QPushButton:default {
+    background-color: #0284c7;
+    border: 1px solid #38bdf8;
+    color: #ffffff;
+}
+QMessageBox QPushButton:default:hover {
+    background-color: #0369a1;
+    border-color: #7dd3fc;
+}
+QInputDialog {
+    background-color: #0c1322;
+    color: #f8fafc;
+}
+QInputDialog QLabel {
+    color: #cbd5e1;
+    font-size: 13px;
+    background-color: transparent;
+}
+QInputDialog QLineEdit {
+    background-color: #070c18;
+    border: 1px solid #273956;
+    border-radius: 7px;
+    color: #f8fafc;
+    padding: 8px 12px;
+    font-size: 13px;
+    selection-background-color: #0284c7;
+}
+QInputDialog QLineEdit:focus {
+    border: 1px solid #38bdf8;
+    background-color: #0c1424;
+}
+QInputDialog QPushButton {
+    min-width: 80px;
+    padding: 7px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 6px;
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    color: #e2e8f0;
+}
+QInputDialog QPushButton:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+    color: #ffffff;
+}
+QInputDialog QPushButton:default {
+    background-color: #0284c7;
+    border: 1px solid #38bdf8;
+    color: #ffffff;
+}
+QFrame.card, QFrame[class="card"] {
+    background-color: #111a2e;
+    border: 1px solid #1e2d4a;
+    border-radius: 10px;
+    padding: 14px;
+}
+QFrame.metric-card, QFrame[class="metric-card"] {
+    background-color: #0c1424;
+    border: 1px solid #1a263c;
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+QLabel.section-title, QLabel[class="section-title"] {
+    font-size: 12px;
+    font-weight: 700;
+    color: #38bdf8;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+}
+QLabel.metric-title, QLabel[class="metric-title"] {
+    font-size: 11px;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+QLabel.metric-value, QLabel[class="metric-value"] {
+    font-size: 16px;
+    font-weight: 700;
+    color: #f8fafc;
+}
+QLineEdit {
+    background-color: #0a101d;
+    border: 1px solid #273956;
+    border-radius: 7px;
+    color: #f8fafc;
+    padding: 8px 12px;
+    font-size: 13px;
+    selection-background-color: #0284c7;
+}
+QLineEdit:focus {
+    border: 1px solid #38bdf8;
+    background-color: #0c1424;
+}
+QLineEdit:disabled {
+    background-color: #080d18;
+    color: #475569;
+    border: 1px solid #162032;
+}
+QPushButton {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 7px;
+    color: #e2e8f0;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 14px;
+}
+QPushButton:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+    color: #ffffff;
+}
+QPushButton:pressed {
+    background-color: #162033;
+}
+QPushButton:disabled {
+    background-color: #0d131f;
+    color: #475569;
+    border-color: #192436;
+}
+QPushButton.btn-primary, QPushButton[class="btn-primary"] {
+    background-color: #0284c7;
+    border: 1px solid #38bdf8;
+    color: #ffffff;
+}
+QPushButton.btn-primary:hover, QPushButton[class="btn-primary"]:hover {
+    background-color: #0369a1;
+    border-color: #7dd3fc;
+}
+QPushButton.btn-primary:pressed, QPushButton[class="btn-primary"]:pressed {
+    background-color: #075985;
+}
+QPushButton.btn-secondary, QPushButton[class="btn-secondary"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    color: #cbd5e1;
+}
+QPushButton.btn-secondary:hover, QPushButton[class="btn-secondary"]:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+    color: #ffffff;
+}
+QPushButton.btn-secondary:pressed, QPushButton[class="btn-secondary"]:pressed {
+    background-color: #162033;
+}
+QPushButton.btn-start, QPushButton[class="btn-start"] {
+    background-color: #059669;
+    border: 1px solid #10b981;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 10px 24px;
+    border-radius: 8px;
+}
+QPushButton.btn-start:hover, QPushButton[class="btn-start"]:hover {
+    background-color: #047857;
+    border-color: #34d399;
+}
+QPushButton.btn-start:pressed, QPushButton[class="btn-start"]:pressed {
+    background-color: #065f46;
+}
+QPushButton.btn-stop, QPushButton[class="btn-stop"] {
+    background-color: #dc2626;
+    border: 1px solid #ef4444;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 700;
+    padding: 10px 24px;
+    border-radius: 8px;
+}
+QPushButton.btn-stop:hover, QPushButton[class="btn-stop"]:hover {
+    background-color: #b91c1c;
+    border-color: #f87171;
+}
+QPushButton.btn-stop:pressed, QPushButton[class="btn-stop"]:pressed {
+    background-color: #991b1b;
+}
+QProgressBar {
+    background-color: #090e1a;
+    border: 1px solid #1a2538;
+    border-radius: 5px;
+    text-align: center;
+    color: #f8fafc;
+    font-size: 10px;
+    font-weight: 600;
+    height: 10px;
+}
+QProgressBar::chunk {
+    background-color: #0284c7;
+    border-radius: 4px;
+}
+QProgressBar.overall::chunk, QProgressBar[class="overall"]::chunk {
+    background-color: #10b981;
+    border-radius: 4px;
+}
+QTreeWidget {
+    background-color: #080d18;
+    border: 1px solid #1a2538;
+    border-radius: 8px;
+    color: #f1f5f9;
+    font-size: 12px;
+    padding: 4px;
+}
+QTreeWidget::item {
+    padding: 5px 4px;
+    border-radius: 4px;
+}
+QTreeWidget::item:hover {
+    background-color: #141e30;
+}
+QTreeWidget::item:selected {
+    background-color: #163b6b;
+    color: #ffffff;
+}
+QHeaderView::section {
+    background-color: #0e1628;
+    color: #94a3b8;
+    padding: 6px 10px;
+    border: none;
+    border-bottom: 1px solid #1a2538;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPlainTextEdit {
+    background-color: #060912;
+    border: 1px solid #1a2538;
+    border-radius: 8px;
+    color: #cbd5e1;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    padding: 8px;
+}
+QCheckBox {
+    color: #cbd5e1;
+    font-size: 12px;
+    spacing: 7px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    background-color: #0a101d;
+}
+QCheckBox::indicator:hover {
+    border-color: #475569;
+}
+QCheckBox::indicator:checked {
+    background-color: #0284c7;
+    border-color: #38bdf8;
+}
+QScrollBar:vertical {
+    border: none;
+    background-color: #0a0f1d;
+    width: 8px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background-color: #1e293b;
+    border-radius: 4px;
+    min-height: 20px;
+}
+QScrollBar::handle:vertical:hover {
+    background-color: #334155;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+"""
+
+
+def format_bytes(value: Any) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    try:
+        size = float(value)
+    except (ValueError, TypeError):
+        return "0 B"
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{value} B"
+
+
+def sanitize_filename(name: str) -> str:
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', name)
+    sanitized = sanitized.strip('. ')
+    return sanitized or "DropboxDownload"
+
+
+def safe_local_path(root: Path, relative_path: str) -> Path:
+    normalized = relative_path.replace("\\", "/").strip("/")
+    parts = []
+    for p in normalized.split("/"):
+        p = p.strip()
+        if not p or p in (".", ".."):
+            continue
+        clean_part = re.sub(r'[<>:"/\\|?*]', '_', p).strip('. ')
+        if clean_part:
+            parts.append(clean_part)
+    destination = root.joinpath(*parts).resolve()
+    root_resolved = root.resolve()
+    try:
+        destination.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError(f"Unsafe Dropbox path: {relative_path}")
+    return destination
+
+
+def relative_path(entry: Any) -> str:
+    if hasattr(entry, "rel_path"):
+        return entry.rel_path
+    path = getattr(entry, "path_display", None)
+    return path.lstrip("/") if path else getattr(entry, "name", "")
+
+
+def get_file_type_and_icon(filename: str) -> tuple[str, str]:
+    ext = Path(filename).suffix.lower()
+    if ext in ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico', '.tiff'):
+        return f"{ext[1:].upper()} Image" if ext else "Image", "🖼️ "
+    elif ext in ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm'):
+        return f"{ext[1:].upper()} Video" if ext else "Video", "🎬 "
+    elif ext in ('.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a'):
+        return f"{ext[1:].upper()} Audio" if ext else "Audio", "🎵 "
+    elif ext in ('.zip', '.tar', '.gz', '.bz2', '.7z', '.rar', '.xz'):
+        return f"{ext[1:].upper()} Archive" if ext else "Archive", "📦 "
+    elif ext in ('.pdf',):
+        return "PDF Document", "📕 "
+    elif ext in ('.doc', '.docx', '.odt'):
+        return "Word Document", "📘 "
+    elif ext in ('.xls', '.xlsx', '.csv'):
+        return "Spreadsheet", "📊 "
+    elif ext in ('.ppt', '.pptx'):
+        return "Presentation", "📙 "
+    elif ext in ('.txt', '.md', '.rtf', '.log', '.json', '.xml', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css'):
+        return f"{ext[1:].upper()} Text" if ext else "Text File", "📝 "
+    elif ext in ('.exe', '.msi', '.apk'):
+        return "Executable", "⚙️ "
+    else:
+        return f"{ext[1:].upper()} File" if ext else "File", "📄 "
+
+
+def build_tree_hierarchy(entries: list, root_name: str = "DropboxFolder") -> dict[str, Any]:
+    root: dict[str, Any] = {
+        "name": root_name,
+        "path": "",
+        "is_dir": True,
+        "size": 0,
+        "total_size": 0,
+        "file_count": 0,
+        "folder_count": 0,
+        "children": {},
+    }
+    for item in entries:
+        raw_path = item.get("path", "").replace("\\", "/").strip("/")
+        if not raw_path:
+            continue
+        parts = [p.strip() for p in raw_path.split("/") if p.strip()]
+        if not parts:
+            continue
+
+        if len(parts) > 1 and parts[0].lower() == root_name.lower():
+            parts = parts[1:]
+        elif len(parts) == 1 and parts[0].lower() == root_name.lower() and item.get("is_dir"):
+            continue
+
+        curr: dict[str, Any] = root
+        for i, part in enumerate(parts):
+            is_last = (i == len(parts) - 1)
+            children: dict[str, Any] = curr["children"]
+            if part not in children:
+                children[part] = {
+                    "name": part,
+                    "path": "/".join(parts[:i + 1]),
+                    "is_dir": item["is_dir"] if is_last else True,
+                    "size": item.get("size", 0) if is_last else 0,
+                    "total_size": 0,
+                    "file_count": 0,
+                    "folder_count": 0,
+                    "children": {},
+                }
+            elif is_last:
+                children[part]["is_dir"] = item["is_dir"]
+                children[part]["size"] = item.get("size", 0)
+            curr = children[part]
+
+    def compute_metrics(node: dict[str, Any]) -> tuple[int, int]:
+        if not node["is_dir"]:
+            return int(node.get("size", 0) or 0), 1
+        total_sz = 0
+        total_fl = 0
+        total_fo = 0
+        for child in node["children"].values():
+            c_sz, c_fl = compute_metrics(child)
+            total_sz += c_sz
+            total_fl += c_fl
+            if child["is_dir"]:
+                total_fo += 1
+        node["total_size"] = total_sz
+        node["file_count"] = total_fl
+        node["folder_count"] = total_fo
+        return total_sz, total_fl
+
+    compute_metrics(root)
+    return root
+
+
+def is_path_selected(
+    candidate_path: str,
+    selected_files: set,
+    deselected_files: set,
+    selected_folders: set,
+    deselected_folders: set,
+    has_tree_filter: bool = True,
+) -> bool:
+    if not has_tree_filter:
+        return True
+
+    norm = candidate_path.replace("\\", "/").strip("/")
+    if not norm:
+        return False
+
+    parts = [p for p in norm.split("/") if p]
+    if not parts:
+        return False
+
+    all_suffixes = ["/".join(parts[i:]) for i in range(len(parts))]
+
+    for suffix in all_suffixes:
+        if suffix in deselected_files:
+            return False
+
+    for suffix in all_suffixes:
+        if suffix in selected_files:
+            return True
+
+    for suffix in all_suffixes:
+        if suffix in deselected_folders:
+            return False
+
+    for suffix in all_suffixes:
+        if suffix in selected_folders:
+            return True
+
+    for i in range(len(parts) - 1, 0, -1):
+        ancestor = "/".join(parts[:i])
+        for suffix in ["/".join(ancestor.split("/")[j:]) for j in range(len(ancestor.split("/")))]:
+            if suffix in deselected_folders:
+                return False
+            if suffix in selected_folders:
+                return True
+
+    if selected_files or selected_folders:
+        return False
+
+    return True
+
+
+def create_dropbox_client(
+    access_token: str | None = None,
+    refresh_token: str | None = None,
+    app_key: str | None = None,
+) -> dropbox.Dropbox:
+    """Create an authenticated Dropbox client, supporting OAuth PKCE refresh tokens."""
+    r_token = (refresh_token or "").strip()
+    a_token = (access_token or "").strip()
+    k = (app_key or "").strip()
+
+    if r_token and k:
+        return dropbox.Dropbox(
+            oauth2_access_token=a_token or None,
+            oauth2_refresh_token=r_token,
+            app_key=k,
+        )
+    if a_token:
+        return dropbox.Dropbox(oauth2_access_token=a_token)
+    raise ValueError("Not authenticated. Please sign in with your Dropbox account first.")
+
+
+# ==============================================================================
+# Scan Worker (Inspects folders via Dropbox API)
+# ==============================================================================
+class ScanWorker(QObject):
+    finished = Signal(dict, str, list)  # tree_dict, root_name, entries_list
+    failed = Signal(str)
+    status = Signal(str)
+
+    def __init__(
+        self,
+        url: str,
+        token: str = "",
+        password: str | None = None,
+        access_token: str | None = None,
+        refresh_token: str | None = None,
+        app_key: str | None = None,
+    ):
+        super().__init__()
+        self.url = url.strip()
+        self.access_token = (access_token or token or "").strip()
+        self.refresh_token = (refresh_token or "").strip()
+        self.app_key = (app_key or "").strip()
+        self.token = self.access_token
+        self.password = password.strip() if password else None
+
+    @Slot()
+    def run(self):
+        try:
+            parsed = urlparse(self.url)
+            if parsed.scheme not in ("http", "https") or "dropbox.com" not in parsed.netloc:
+                raise ValueError("Please enter a valid Dropbox shared URL.")
+
+            if not self.access_token and not self.refresh_token:
+                raise ValueError("Please sign in with your Dropbox account to inspect folders.")
+
+            entries = []
+            root_name = "DropboxFolder"
+
+            self.status.emit("Connecting to Dropbox API...")
+            dbx = create_dropbox_client(
+                access_token=self.access_token,
+                refresh_token=self.refresh_token,
+                app_key=self.app_key,
+            )
+
+            try:
+                meta_kwargs: dict[str, Any] = {"url": self.url}
+                if self.password:
+                    meta_kwargs["link_password"] = self.password
+                meta = dbx.sharing_get_shared_link_metadata(**meta_kwargs)
+                root_name = getattr(meta, "name", None) or "DropboxFolder"
+            except ApiError as exc:
+                if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
+                    raise ValueError(
+                        "Access Denied: This link is password-protected.\n"
+                        "Please enter the link password in the credentials section."
+                    )
+                raise
+
+            shared_link = SharedLink(
+                url=self.url,
+                password=self.password if self.password else None,
+            )
+
+            self.status.emit("Querying folder hierarchy...")
+
+            def collect_recursive(api_path="", rel_dir=""):
+                res: Any = dbx.files_list_folder(path=api_path, shared_link=shared_link, recursive=False)
+                subfolders_to_visit = []
+                if res and hasattr(res, "entries"):
+                    for e in res.entries:
+                        is_dir = isinstance(e, FolderMetadata)
+                        name = e.name
+                        if not name:
+                            continue
+                        rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
+                        size = getattr(e, "size", 0) if not is_dir else 0
+                        entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size})
+                        if is_dir:
+                            next_api = f"{api_path}/{name}" if api_path else f"/{name}"
+                            subfolders_to_visit.append((next_api, rel))
+
+                while res and getattr(res, "has_more", False):
+                    res = dbx.files_list_folder_continue(res.cursor)
+                    if res and hasattr(res, "entries"):
+                        for e in res.entries:
+                            is_dir = isinstance(e, FolderMetadata)
+                            name = e.name
+                            if not name:
+                                continue
+                            rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
+                            size = getattr(e, "size", 0) if not is_dir else 0
+                            entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size})
+                            if is_dir:
+                                next_api = f"{api_path}/{name}" if api_path else f"/{name}"
+                                subfolders_to_visit.append((next_api, rel))
+
+                for next_api, next_rel in subfolders_to_visit:
+                    collect_recursive(next_api, next_rel)
+
+            collect_recursive("", "")
+
+            root_name = sanitize_filename(root_name) or "DropboxFolder"
+            tree = build_tree_hierarchy(entries, root_name)
+            self.finished.emit(tree, root_name, entries)
+
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+# ==============================================================================
+# Download Worker (Granular Selective Dropbox API Downloads)
+# ==============================================================================
+@dataclass
+class DownloadFileItem:
+    name: str
+    size: int
+    rel_path: str
+    api_path: str
+    metadata: Any = None
+
+    @property
+    def _custom_rel_path(self) -> str:
+        return self.rel_path
+
+    @property
+    def _custom_api_path(self) -> str:
+        return self.api_path
+
+
+class DownloadWorker(QObject):
+    log = Signal(str)
+    folder_changed = Signal(str)
+    file_changed = Signal(str)
+    current_progress = Signal(int)
+    overall_progress = Signal(int)
+    stats_changed = Signal(dict)
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        url: str,
+        destination: str,
+        token: str = "",
+        access_token: str | None = None,
+        refresh_token: str | None = None,
+        app_key: str | None = None,
+        link_password: str | None = None,
+        skip_existing: bool = True,
+        selected_files: set[str] | None = None,
+        deselected_files: set[str] | None = None,
+        selected_folders: set[str] | None = None,
+        deselected_folders: set[str] | None = None,
+        has_tree_filter: bool = False,
+    ):
+        super().__init__()
+        self.url = url.strip()
+        self.access_token = (access_token or token or "").strip()
+        self.refresh_token = (refresh_token or "").strip()
+        self.app_key = (app_key or "").strip()
+        self.token = self.access_token
+        self.destination = Path(destination)
+        self.link_password = link_password.strip() if link_password else None
+        self.skip_existing = skip_existing
+        self.selected_files = selected_files or set()
+        self.deselected_files = deselected_files or set()
+        self.selected_folders = selected_folders or set()
+        self.deselected_folders = deselected_folders or set()
+        self.has_tree_filter = has_tree_filter
+        self.stop_requested = False
+        self.files: list[DownloadFileItem] = []
+        self.folders = 0
+        self.done = 0
+        self.skipped = 0
+        self.errors = 0
+        self.bytes_done = 0
+        self.started: float = 0.0
+
+    def is_selected(self, rel_path: str) -> bool:
+        return is_path_selected(
+            rel_path,
+            self.selected_files,
+            self.deselected_files,
+            self.selected_folders,
+            self.deselected_folders,
+            self.has_tree_filter,
+        )
+
+    def stop(self):
+        self.stop_requested = True
+
+    def list_folder(self, dbx: dropbox.Dropbox, shared_link: SharedLink, path: str):
+        result: Any = dbx.files_list_folder(
+            path=path,
+            recursive=False,
+            shared_link=shared_link,
+            include_non_downloadable_files=True,
+        )
+        if result and hasattr(result, "entries"):
+            yield from result.entries
+
+        while result and getattr(result, "has_more", False) and not self.stop_requested:
+            result = dbx.files_list_folder_continue(result.cursor)
+            if result and hasattr(result, "entries"):
+                yield from result.entries
+
+    def collect(self, dbx: dropbox.Dropbox, shared_link: SharedLink, api_path="", rel_dir=""):
+        if self.stop_requested:
+            return
+
+        self.folder_changed.emit(api_path if api_path else "/")
+
+        try:
+            entries = list(self.list_folder(dbx, shared_link, api_path))
+        except ApiError as exc:
+            self.errors += 1
+            if "shared_link_access_denied" in str(exc) or "password" in str(exc).lower():
+                self.log.emit(f"🔒 Access denied listing {api_path or '/'}: Password may be required.")
+            else:
+                self.log.emit(f"ERROR listing {api_path or '/'}: {exc}")
+            return
+        except Exception as exc:
+            self.errors += 1
+            self.log.emit(f"ERROR listing {api_path or '/'}: {exc}")
+            return
+
+        for entry in entries:
+            if self.stop_requested:
+                return
+            if isinstance(entry, FileMetadata):
+                entry_rel = f"{rel_dir}/{entry.name}".strip("/") if rel_dir else entry.name
+                entry_api = f"{api_path}/{entry.name}" if api_path else f"/{entry.name}"
+                self.files.append(
+                    DownloadFileItem(
+                        name=entry.name,
+                        size=getattr(entry, "size", 0) or 0,
+                        rel_path=entry_rel,
+                        api_path=entry_api,
+                        metadata=entry,
+                    )
+                )
+
+        for entry in entries:
+            if self.stop_requested:
+                return
+            if isinstance(entry, FolderMetadata):
+                self.folders += 1
+                sub_rel = f"{rel_dir}/{entry.name}".strip("/") if rel_dir else entry.name
+                sub_api = f"{api_path}/{entry.name}" if api_path else f"/{entry.name}"
+                self.collect(dbx, shared_link, api_path=sub_api, rel_dir=sub_rel)
+
+    def download_one(self, dbx: dropbox.Dropbox, entry: Any, local_root: Path):
+        if isinstance(entry, DownloadFileItem):
+            rel = entry.rel_path
+            api_path = entry.api_path
+            file_size = entry.size
+            file_name = entry.name
+        elif isinstance(entry, dict):
+            rel = entry.get("rel_path") or entry.get("path") or ""
+            api_path = entry.get("api_path") or (f"/{rel}" if not rel.startswith("/") else rel)
+            file_size = int(entry.get("size", 0) or 0)
+            file_name = entry.get("name") or Path(rel).name
+        else:
+            rel = getattr(entry, "rel_path", None) or getattr(entry, "_custom_rel_path", None) or relative_path(entry)
+            api_path = getattr(entry, "api_path", None) or getattr(entry, "_custom_api_path", None) or (f"/{rel}" if not rel.startswith("/") else rel)
+            file_size = getattr(entry, "size", 0)
+            file_name = getattr(entry, "name", Path(rel).name)
+
+        local_file = safe_local_path(local_root, rel)
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+
+        rel_clean = rel.replace("\\", "/").strip("/")
+        if "/" in rel_clean:
+            folder_display = Path(rel_clean).parent.as_posix()
+        else:
+            folder_display = "/ (Root)"
+        file_display = file_name or Path(rel_clean).name
+
+        self.folder_changed.emit(folder_display)
+        self.file_changed.emit(f"{file_display}  ({format_bytes(file_size)})")
+
+        if self.skip_existing and local_file.exists():
+            if local_file.stat().st_size == file_size:
+                self.skipped += 1
+                self.bytes_done += file_size
+                self.current_progress.emit(100)
+                self.log.emit(f"SKIP  [{folder_display}] {file_display} (already exists)")
+                return
+
+        temp_file = local_file.with_name(f"{local_file.name}.tmp_{int(time.time())}")
+        self.log.emit(f"GET   [{folder_display}] {file_display} ({format_bytes(file_size)})")
+
+        try:
+            download_kwargs: dict[str, Any] = {"url": self.url, "path": api_path}
+            if self.link_password:
+                download_kwargs["link_password"] = self.link_password
+
+            res: Any = dbx.sharing_get_shared_link_file(**download_kwargs)
+            metadata, response = res
+            downloaded = 0
+            start_time = time.time()
+
+            with open(temp_file, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 128):
+                    if self.stop_requested:
+                        f.close()
+                        temp_file.unlink(missing_ok=True)
+                        return
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if file_size > 0:
+                            pct = int(downloaded * 100 / file_size)
+                            self.current_progress.emit(pct)
+
+                    elapsed = max(time.time() - start_time, 0.001)
+                    speed = downloaded / elapsed
+                    self.stats_changed.emit({
+                        "speed": f"{format_bytes(int(speed))}/s",
+                        "data": f"{format_bytes(self.bytes_done + downloaded)}",
+                        "files": f"{self.done + 1}/{len(self.files)} files",
+                        "elapsed": f"{int(max(time.time() - self.started, 0) // 60):02d}:{int(max(time.time() - self.started, 0) % 60):02d}",
+                    })
+
+            actual = temp_file.stat().st_size
+            if actual != file_size:
+                temp_file.unlink(missing_ok=True)
+                raise IOError(f"size mismatch: expected {file_size}, got {actual}")
+
+            os.replace(temp_file, local_file)
+            self.done += 1
+            self.bytes_done += actual
+            self.current_progress.emit(100)
+            self.log.emit(f"DONE  [{folder_display}] {file_display}")
+
+        except Exception as exc:
+            temp_file.unlink(missing_ok=True)
+            self.errors += 1
+            if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
+                self.log.emit(f"🔒 ERROR [{folder_display}] {file_display}: Password protected. Verify link password.")
+            else:
+                self.log.emit(f"ERROR [{folder_display}] {file_display}: {exc}")
+
+    @Slot()
+    def run(self):
+        try:
+            self.started = time.time()
+            parsed = urlparse(self.url)
+            if parsed.scheme not in ("http", "https") or "dropbox.com" not in parsed.netloc:
+                raise ValueError("Please enter a valid Dropbox shared URL.")
+
+            if not self.access_token and not self.refresh_token:
+                raise ValueError("Please sign in with your Dropbox account to download files.")
+
+            self.destination.mkdir(parents=True, exist_ok=True)
+            dbx = create_dropbox_client(
+                access_token=self.access_token,
+                refresh_token=self.refresh_token,
+                app_key=self.app_key,
+            )
+
+            try:
+                account: Any = dbx.users_get_current_account()
+                if account and hasattr(account, "name") and account.name:
+                    self.log.emit(f"🔑 Authenticated as: {account.name.display_name} ({account.email})")
+            except AuthError:
+                raise ValueError("Invalid or expired Dropbox session. Please sign in again.")
+
+            try:
+                metadata_kwargs: dict[str, Any] = {"url": self.url}
+                if self.link_password:
+                    metadata_kwargs["link_password"] = self.link_password
+                metadata = dbx.sharing_get_shared_link_metadata(**metadata_kwargs)
+                root_name = getattr(metadata, "name", None) or "DropboxFolder"
+            except ApiError as exc:
+                if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
+                    raise ValueError(
+                        "Access Denied: This link is password-protected or restricted.\n"
+                        "Please verify the folder password entered in the credentials section."
+                    )
+                raise
+
+            root_name = sanitize_filename(root_name) or "DropboxFolder"
+            local_root = safe_local_path(self.destination, root_name)
+            local_root.mkdir(parents=True, exist_ok=True)
+
+            self.log.emit(f"📁 Destination folder: {local_root}")
+            self.log.emit("🔍 Querying Dropbox hierarchy...")
+
+            shared_link = SharedLink(
+                url=self.url,
+                password=self.link_password if self.link_password else None,
+            )
+
+            self.collect(dbx, shared_link, api_path="", rel_dir="")
+
+            if self.stop_requested:
+                self.finished.emit("Download stopped.")
+                return
+
+            # Filter files by user selection in tree
+            all_discovered = list(self.files)
+            filtered_files: list[DownloadFileItem] = []
+            for entry in all_discovered:
+                rel = getattr(entry, "rel_path", None) or getattr(entry, "_custom_rel_path", None) or relative_path(entry)
+                if self.is_selected(rel):
+                    filtered_files.append(entry)
+                else:
+                    self.skipped += 1
+                    self.log.emit(f"SKIP  {rel} (deselected in tree)")
+
+            self.files = filtered_files
+            self.log.emit(f"✓ Selected {len(self.files)} of {len(all_discovered)} file(s) to download.")
+            self.log.emit("🚀 Starting direct selective download...")
+
+            for index, entry in enumerate(self.files, start=1):
+                if self.stop_requested:
+                    break
+
+                self.overall_progress.emit(
+                    int((index - 1) * 100 / max(len(self.files), 1))
+                )
+
+                self.download_one(dbx, entry, local_root)
+
+                self.overall_progress.emit(
+                    int(index * 100 / max(len(self.files), 1))
+                )
+
+            elapsed = max(time.time() - self.started, 0.1)
+
+            if self.stop_requested:
+                message = "Download cancelled by user."
+            else:
+                message = (
+                    f"✓ Download Finished Successfully!\n\n"
+                    f"Files Selected: {len(self.files)}\n"
+                    f"Completed: {self.done}\n"
+                    f"Skipped: {self.skipped}\n"
+                    f"Errors: {self.errors}\n"
+                    f"Data Transferred: {format_bytes(self.bytes_done)}\n"
+                    f"Time Elapsed: {elapsed:.1f}s\n"
+                    f"Output Directory: {local_root}"
+                )
+
+            self.finished.emit(message)
+
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+# ==============================================================================
+# Modern Dark Styled Popups & Dialogs
+# ==============================================================================
+class ModernMessageBox(QDialog):
+    """A sleek, modern dark-themed modal dialog replacing native QMessageBox."""
+
+    ICON_INFO = "info"
+    ICON_WARNING = "warning"
+    ICON_ERROR = "error"
+    ICON_QUESTION = "question"
+    ICON_SUCCESS = "success"
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        title: str,
+        message: str,
+        icon_type: str = "info",
+        buttons: list[tuple[str, str, bool]] | None = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(440)
+        self.setMaximumWidth(560)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0c1322;
+                border: 1px solid #1f2e45;
+                border-radius: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(16)
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(16)
+        content_row.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        badge_configs = {
+            self.ICON_INFO: ("ℹ", "#0c2646", "#38bdf8", "#0284c7"),
+            self.ICON_SUCCESS: ("✓", "#064e3b", "#34d399", "#059669"),
+            self.ICON_WARNING: ("⚠", "#451a03", "#fbbf24", "#d97706"),
+            self.ICON_ERROR: ("✕", "#450a0a", "#f87171", "#b91c1c"),
+            self.ICON_QUESTION: ("?", "#172554", "#60a5fa", "#2563eb"),
+        }
+        symbol, bg_col, text_col, border_col = badge_configs.get(
+            icon_type, ("ℹ", "#0c2646", "#38bdf8", "#0284c7")
+        )
+
+        icon_label = QLabel(symbol)
+        icon_label.setFixedSize(40, 40)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setStyleSheet(
+            f"background-color: {bg_col}; color: {text_col}; border: 1px solid {border_col}; "
+            f"border-radius: 20px; font-size: 18px; font-weight: 700;"
+        )
+        content_row.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignTop)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(6)
+
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("color: #f8fafc; font-size: 14px; font-weight: 700;")
+        text_layout.addWidget(title_lbl)
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        msg_lbl.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.45;")
+        text_layout.addWidget(msg_lbl)
+
+        content_row.addLayout(text_layout, stretch=1)
+        layout.addLayout(content_row)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        btn_layout.addStretch()
+
+        self.selected_button_index = -1
+        self._buttons = buttons or [("OK", "primary", True)]
+
+        for idx, (btn_text, btn_role, is_default) in enumerate(self._buttons):
+            btn = QPushButton(btn_text)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            if btn_role == "primary":
+                btn.setProperty("class", "btn-primary")
+            elif btn_role == "danger":
+                btn.setProperty("class", "btn-stop")
+            else:
+                btn.setProperty("class", "btn-secondary")
+
+            if is_default:
+                btn.setDefault(True)
+
+            btn.clicked.connect(lambda checked=False, i=idx: self._on_btn_clicked(i))
+            btn_layout.addWidget(btn)
+
+        layout.addLayout(btn_layout)
+
+    def _on_btn_clicked(self, index: int):
+        self.selected_button_index = index
+        self.accept()
+
+    @classmethod
+    def information(cls, parent: QWidget | None, title: str, message: str):
+        dlg = cls(parent, title=title, message=message, icon_type=cls.ICON_INFO, buttons=[("OK", "primary", True)])
+        dlg.exec()
+
+    @classmethod
+    def warning(cls, parent: QWidget | None, title: str, message: str):
+        dlg = cls(parent, title=title, message=message, icon_type=cls.ICON_WARNING, buttons=[("OK", "primary", True)])
+        dlg.exec()
+
+    @classmethod
+    def error(cls, parent: QWidget | None, title: str, message: str):
+        dlg = cls(parent, title=title, message=message, icon_type=cls.ICON_ERROR, buttons=[("Close", "primary", True)])
+        dlg.exec()
+
+    @classmethod
+    def question(
+        cls,
+        parent: QWidget | None,
+        title: str,
+        message: str,
+        yes_text: str = "Yes",
+        no_text: str = "No",
+        is_destructive: bool = False,
+    ) -> bool:
+        role = "danger" if is_destructive else "primary"
+        dlg = cls(
+            parent,
+            title=title,
+            message=message,
+            icon_type=cls.ICON_QUESTION if not is_destructive else cls.ICON_WARNING,
+            buttons=[(no_text, "secondary", False), (yes_text, role, True)],
+        )
+        dlg.exec()
+        return dlg.selected_button_index == 1
+
+
+class ModernInputDialog(QDialog):
+    """A sleek, modern dark-themed modal input dialog replacing QInputDialog."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        title: str,
+        heading: str,
+        message: str = "",
+        placeholder: str = "",
+        default_text: str = "",
+        is_password: bool = False,
+        confirm_text: str = "Continue",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(500)
+        self.setMaximumWidth(640)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0c1322;
+                border: 1px solid #1f2e45;
+                border-radius: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+
+        icon_char = "🔑" if "key" in title.lower() else "🌐"
+        icon_badge = QLabel(icon_char)
+        icon_badge.setFixedSize(38, 38)
+        icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_badge.setStyleSheet(
+            "background-color: #0c2646; color: #38bdf8; border: 1px solid #0284c7; "
+            "border-radius: 19px; font-size: 17px;"
+        )
+        header_row.addWidget(icon_badge)
+
+        title_lbl = QLabel(heading)
+        title_lbl.setStyleSheet("color: #f8fafc; font-size: 14px; font-weight: 700;")
+        header_row.addWidget(title_lbl, stretch=1)
+        layout.addLayout(header_row)
+
+        if message:
+            msg_frame = QFrame()
+            msg_frame.setStyleSheet(
+                "background-color: #111a2e; border: 1px solid #1e2d4a; border-radius: 8px; padding: 12px 14px;"
+            )
+            msg_layout = QVBoxLayout(msg_frame)
+            msg_layout.setContentsMargins(0, 0, 0, 0)
+            msg_layout.setSpacing(6)
+
+            msg_lbl = QLabel(message)
+            msg_lbl.setWordWrap(True)
+            msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            msg_lbl.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.5;")
+            msg_layout.addWidget(msg_lbl)
+            layout.addWidget(msg_frame)
+
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText(placeholder)
+        self.input_field.setText(default_text)
+        if is_password:
+            self.input_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_field.returnPressed.connect(self.accept)
+        layout.addWidget(self.input_field)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setProperty("class", "btn-secondary")
+        btn_cancel.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton(confirm_text)
+        btn_confirm.setProperty("class", "btn-primary")
+        btn_confirm.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)
+
+    @classmethod
+    def get_text(
+        cls,
+        parent: QWidget | None,
+        title: str,
+        heading: str,
+        message: str = "",
+        placeholder: str = "",
+        default_text: str = "",
+        is_password: bool = False,
+        confirm_text: str = "Continue",
+    ) -> tuple[str, bool]:
+        dlg = cls(
+            parent,
+            title=title,
+            heading=heading,
+            message=message,
+            placeholder=placeholder,
+            default_text=default_text,
+            is_password=is_password,
+            confirm_text=confirm_text,
+        )
+        result = dlg.exec()
+        return (dlg.input_field.text().strip(), result == QDialog.DialogCode.Accepted)
+
+
+# ==============================================================================
+# Main GUI Window
+# ==============================================================================
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Dropbox Recursive Downloader Pro")
+        self.resize(940, 860)
+        self.setMinimumSize(840, 700)
+        self.setStyleSheet(DARK_STYLESHEET)
+
+        self.settings = QSettings("DropboxDownloader", "RecursiveGUI")
+        self.download_thread: QThread | None = None
+        self.worker: DownloadWorker | None = None
+        self.scan_thread: QThread | None = None
+        self.scan_worker: ScanWorker | None = None
+        self._updating_tree = False
+        self._tree_items_data: list[Any] = []
+
+        self.current_access_token: str = ""
+        self.current_refresh_token: str = ""
+        self.current_user_name: str = ""
+        self.current_user_email: str = ""
+
+        self.auto_scan_timer = QTimer(self)
+        self.auto_scan_timer.setSingleShot(True)
+        self.auto_scan_timer.timeout.connect(self.auto_scan_if_valid)
+
+        self.setup_ui()
+        self.load_settings()
+
+    def set_status_badge(self, text: str, state: str = "ready"):
+        styles = {
+            "ready": "background-color: #1e293b; color: #38bdf8; border: 1px solid #334155;",
+            "running": "background-color: #0c2e59; color: #60a5fa; border: 1px solid #1d4ed8;",
+            "success": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
+            "warning": "background-color: #451a03; color: #fbbf24; border: 1px solid #d97706;",
+            "error": "background-color: #450a0a; color: #f87171; border: 1px solid #b91c1c;",
+            "neutral": "background-color: #1e293b; color: #94a3b8; border: 1px solid #334155;",
+        }
+        style_str = styles.get(state, styles["ready"])
+        self.status_badge.setText(text)
+        self.status_badge.setStyleSheet(
+            f"{style_str} border-radius: 12px; padding: 4px 14px; font-weight: 600; font-size: 11px;"
+        )
+
+    def set_auth_badge(self, text: str, state: str = "neutral"):
+        styles = {
+            "connected": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
+            "neutral": "background-color: #1e293b; color: #94a3b8; border: 1px solid #334155;",
+        }
+        style_str = styles.get(state, styles["neutral"])
+        self.auth_badge.setText(text)
+        self.auth_badge.setStyleSheet(
+            f"{style_str} border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 600;"
+        )
+
+    def set_selection_summary(self, text: str, state: str = "neutral"):
+        colors = {
+            "neutral": "#94a3b8",
+            "active": "#38bdf8",
+            "success": "#10b981",
+            "error": "#f87171",
+        }
+        col = colors.get(state, "#94a3b8")
+        self.selection_summary_label.setText(text)
+        self.selection_summary_label.setStyleSheet(f"font-size: 11px; color: {col}; font-weight: 600;")
+
+    def setup_ui(self):
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(18, 18, 18, 18)
+        main_layout.setSpacing(14)
+
+        # Header Section
+        header_layout = QHBoxLayout()
+        header_text_layout = QVBoxLayout()
+
+        title_label = QLabel("Dropbox Recursive Downloader")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet("color: #38bdf8;")
+
+        subtitle_label = QLabel("Selectively download files and entire folder hierarchies directly from Dropbox shared links")
+        subtitle_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+
+        header_text_layout.addWidget(title_label)
+        header_text_layout.addWidget(subtitle_label)
+        header_layout.addLayout(header_text_layout)
+
+        header_layout.addStretch()
+
+        self.status_badge = QLabel()
+        self.set_status_badge("● Ready", "ready")
+        header_layout.addWidget(self.status_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
+        main_layout.addLayout(header_layout)
+
+        # 1. Dropbox Account Card
+        auth_card = QFrame()
+        auth_card.setProperty("class", "card")
+        auth_layout = QVBoxLayout(auth_card)
+        auth_layout.setContentsMargins(16, 14, 16, 14)
+        auth_layout.setSpacing(12)
+
+        auth_header_row = QHBoxLayout()
+        auth_title = QLabel("1. Dropbox Account")
+        auth_title.setProperty("class", "section-title")
+        auth_header_row.addWidget(auth_title)
+        auth_header_row.addStretch()
+
+        self.auth_badge = QLabel()
+        self.set_auth_badge("○ Not Logged In", "neutral")
+        auth_header_row.addWidget(self.auth_badge)
+        auth_layout.addLayout(auth_header_row)
+
+        account_box = QFrame()
+        account_box.setStyleSheet(
+            "background-color: #0c1424; border: 1px solid #1a263c; border-radius: 8px; padding: 10px 14px;"
+        )
+        account_box_layout = QHBoxLayout(account_box)
+        account_box_layout.setContentsMargins(0, 0, 0, 0)
+        account_box_layout.setSpacing(12)
+
+        self.account_info_layout = QVBoxLayout()
+        self.account_info_layout.setSpacing(2)
+
+        self.account_name_label = QLabel("No Dropbox account connected")
+        self.account_name_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #f8fafc;")
+
+        self.account_sub_label = QLabel("Sign in to your Dropbox account to inspect and download shared links.")
+        self.account_sub_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+
+        self.account_info_layout.addWidget(self.account_name_label)
+        self.account_info_layout.addWidget(self.account_sub_label)
+        account_box_layout.addLayout(self.account_info_layout)
+        account_box_layout.addStretch()
+
+        self.btn_oauth_login = QPushButton("🌐  Log In with Dropbox")
+        self.btn_oauth_login.setProperty("class", "btn-primary")
+        self.btn_oauth_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_oauth_login.setToolTip("Sign into your Dropbox account via browser (PKCE OAuth)")
+        self.btn_oauth_login.clicked.connect(self.login_with_dropbox)
+        account_box_layout.addWidget(self.btn_oauth_login)
+
+        self.btn_logout = QPushButton("Sign Out")
+        self.btn_logout.setProperty("class", "btn-secondary")
+        self.btn_logout.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_logout.setToolTip("Sign out of current Dropbox account")
+        self.btn_logout.clicked.connect(self.logout_dropbox)
+        self.btn_logout.setVisible(False)
+        account_box_layout.addWidget(self.btn_logout)
+
+        auth_layout.addWidget(account_box)
+
+        pwd_label = QLabel("Folder Link Password (Only if folder is password-protected):")
+        pwd_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1; margin-top: 4px;")
+        auth_layout.addWidget(pwd_label)
+
+        pwd_row = QHBoxLayout()
+        self.link_password_input = QLineEdit()
+        self.link_password_input.setPlaceholderText("Enter folder link password (leave blank if public)")
+        self.link_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.btn_toggle_pwd = QPushButton("Show")
+        self.btn_toggle_pwd.setFixedWidth(60)
+        self.btn_toggle_pwd.clicked.connect(self.toggle_pwd_visibility)
+
+        pwd_row.addWidget(self.link_password_input)
+        pwd_row.addWidget(self.btn_toggle_pwd)
+        auth_layout.addLayout(pwd_row)
+
+        main_layout.addWidget(auth_card)
+
+        # 2. Source & Local Destination Card
+        target_card = QFrame()
+        target_card.setProperty("class", "card")
+        target_layout = QVBoxLayout(target_card)
+        target_layout.setContentsMargins(14, 12, 14, 12)
+        target_layout.setSpacing(10)
+
+        target_title = QLabel("2. Source & Local Destination")
+        target_title.setProperty("class", "section-title")
+        target_layout.addWidget(target_title)
+
+        url_label = QLabel("Dropbox Shared Link:")
+        url_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1;")
+        target_layout.addWidget(url_label)
+
+        url_row = QHBoxLayout()
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://www.dropbox.com/scl/fo/... or https://www.dropbox.com/sh/...")
+        self.url_input.textChanged.connect(self.on_url_text_changed)
+
+        self.btn_paste_url = QPushButton("Paste")
+        self.btn_paste_url.setFixedWidth(60)
+        self.btn_paste_url.clicked.connect(self.paste_url)
+
+        self.btn_clear_url = QPushButton("Clear")
+        self.btn_clear_url.setFixedWidth(60)
+        self.btn_clear_url.clicked.connect(self.clear_url_and_tree)
+
+        self.btn_scan_url = QPushButton("🔍 Load Folders")
+        self.btn_scan_url.setProperty("class", "btn-primary")
+        self.btn_scan_url.clicked.connect(self.start_scan)
+
+        url_row.addWidget(self.url_input)
+        url_row.addWidget(self.btn_paste_url)
+        url_row.addWidget(self.btn_clear_url)
+        url_row.addWidget(self.btn_scan_url)
+        target_layout.addLayout(url_row)
+
+        dest_label = QLabel("Save Downloaded Files To:")
+        dest_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1; margin-top: 4px;")
+        target_layout.addWidget(dest_label)
+
+        dest_row = QHBoxLayout()
+        self.destination_input = QLineEdit()
+        self.destination_input.setText(str(Path.home() / "Downloads"))
+
+        btn_browse = QPushButton("Browse...")
+        btn_browse.setFixedWidth(85)
+        btn_browse.clicked.connect(self.browse_destination)
+
+        btn_open_folder = QPushButton("Open Folder")
+        btn_open_folder.setFixedWidth(95)
+        btn_open_folder.clicked.connect(self.open_destination_folder)
+
+        dest_row.addWidget(self.destination_input)
+        dest_row.addWidget(btn_browse)
+        dest_row.addWidget(btn_open_folder)
+        target_layout.addLayout(dest_row)
+
+        dest_opts_row = QHBoxLayout()
+        self.check_skip_existing = QCheckBox("Skip files that already exist locally (matching exact size)")
+        self.check_skip_existing.setChecked(True)
+        dest_opts_row.addWidget(self.check_skip_existing)
+        dest_opts_row.addStretch()
+        target_layout.addLayout(dest_opts_row)
+
+        main_layout.addWidget(target_card)
+
+        # 3. Tree Selection Card
+        tree_card = QFrame()
+        tree_card.setProperty("class", "card")
+        tree_layout = QVBoxLayout(tree_card)
+        tree_layout.setContentsMargins(14, 12, 14, 12)
+        tree_layout.setSpacing(8)
+
+        tree_header = QHBoxLayout()
+        tree_title = QLabel("3. Folder & File Selection")
+        tree_title.setProperty("class", "section-title")
+        tree_header.addWidget(tree_title)
+
+        self.selection_summary_label = QLabel("(Paste link to inspect folders)")
+        self.selection_summary_label.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 500;")
+        tree_header.addWidget(self.selection_summary_label)
+
+        tree_header.addStretch()
+
+        btn_select_all = QPushButton("Select All")
+        btn_select_all.clicked.connect(self.select_all_items)
+        btn_deselect_all = QPushButton("Deselect All")
+        btn_deselect_all.clicked.connect(self.deselect_all_items)
+        btn_expand_all = QPushButton("Expand All")
+        btn_expand_all.clicked.connect(lambda: self.tree_widget.expandAll())
+        btn_collapse_all = QPushButton("Collapse All")
+        btn_collapse_all.clicked.connect(lambda: self.tree_widget.collapseAll())
+
+        tree_header.addWidget(btn_select_all)
+        tree_header.addWidget(btn_deselect_all)
+        tree_header.addWidget(btn_expand_all)
+        tree_header.addWidget(btn_collapse_all)
+        tree_layout.addLayout(tree_header)
+
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setHeaderLabels(["Name", "Type", "Size"])
+        self.tree_widget.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree_widget.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree_widget.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree_widget.setMinimumHeight(240)
+        self.tree_widget.setAnimated(True)
+        self.tree_widget.setExpandsOnDoubleClick(True)
+        self.tree_widget.itemChanged.connect(self.on_tree_item_changed)
+        self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
+        self.tree_widget.itemExpanded.connect(self.on_tree_item_expanded)
+        self.tree_widget.itemCollapsed.connect(self.on_tree_item_collapsed)
+        self.tree_widget.currentItemChanged.connect(self.on_tree_current_item_changed)
+        tree_layout.addWidget(self.tree_widget)
+
+        self.tree_hint = QLabel("💡 Tip: Click any folder to expand/collapse. Unchecked items will not be downloaded.")
+        self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        tree_layout.addWidget(self.tree_hint)
+
+        main_layout.addWidget(tree_card)
+
+        # 4. Progress & Status Card
+        progress_card = QFrame()
+        progress_card.setProperty("class", "card")
+        progress_layout = QVBoxLayout(progress_card)
+        progress_layout.setContentsMargins(14, 12, 14, 12)
+        progress_layout.setSpacing(10)
+
+        prog_title = QLabel("4. Download Status & Progress")
+        prog_title.setProperty("class", "section-title")
+        progress_layout.addWidget(prog_title)
+
+        # Current File Progress Row
+        file_prog_header = QHBoxLayout()
+        lbl_cur = QLabel("Current File:")
+        lbl_cur.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        self.file_label = QLabel("Idle")
+        self.file_label.setStyleSheet("font-size: 11px; color: #f1f5f9; font-weight: 600;")
+        file_prog_header.addWidget(lbl_cur)
+        file_prog_header.addWidget(self.file_label)
+        file_prog_header.addStretch()
+        self.file_pct_label = QLabel("0%")
+        self.file_pct_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #38bdf8;")
+        file_prog_header.addWidget(self.file_pct_label)
+        progress_layout.addLayout(file_prog_header)
+
+        self.file_progress = QProgressBar()
+        self.file_progress.setRange(0, 100)
+        self.file_progress.setValue(0)
+        progress_layout.addWidget(self.file_progress)
+
+        # Overall Progress Row
+        overall_prog_header = QHBoxLayout()
+        lbl_all = QLabel("Overall Download Progress:")
+        lbl_all.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        self.folder_label = QLabel("Idle")
+        self.folder_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        overall_prog_header.addWidget(lbl_all)
+        overall_prog_header.addWidget(self.folder_label)
+        overall_prog_header.addStretch()
+        self.overall_pct_label = QLabel("0%")
+        self.overall_pct_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #10b981;")
+        overall_prog_header.addWidget(self.overall_pct_label)
+        progress_layout.addLayout(overall_prog_header)
+
+        self.overall_progress = QProgressBar()
+        self.overall_progress.setProperty("class", "overall")
+        self.overall_progress.setRange(0, 100)
+        self.overall_progress.setValue(0)
+        progress_layout.addWidget(self.overall_progress)
+
+        # Live Metrics Grid
+        metrics_grid = QGridLayout()
+        metrics_grid.setSpacing(10)
+
+        # Speed Card
+        c_speed = QFrame()
+        c_speed.setProperty("class", "metric-card")
+        l_speed = QVBoxLayout(c_speed)
+        l_speed.setContentsMargins(6, 4, 6, 4)
+        t_speed = QLabel("⚡ Speed")
+        t_speed.setProperty("class", "metric-title")
+        self.val_speed = QLabel("0 B/s")
+        self.val_speed.setProperty("class", "metric-value")
+        l_speed.addWidget(t_speed)
+        l_speed.addWidget(self.val_speed)
+        metrics_grid.addWidget(c_speed, 0, 0)
+
+        # Transferred Card
+        c_data = QFrame()
+        c_data.setProperty("class", "metric-card")
+        l_data = QVBoxLayout(c_data)
+        l_data.setContentsMargins(6, 4, 6, 4)
+        t_data = QLabel("📦 Transferred")
+        t_data.setProperty("class", "metric-title")
+        self.val_data = QLabel("0 B")
+        self.val_data.setProperty("class", "metric-value")
+        l_data.addWidget(t_data)
+        l_data.addWidget(self.val_data)
+        metrics_grid.addWidget(c_data, 0, 1)
+
+        # Files Completed Card
+        c_files = QFrame()
+        c_files.setProperty("class", "metric-card")
+        l_files = QVBoxLayout(c_files)
+        l_files.setContentsMargins(6, 4, 6, 4)
+        t_files = QLabel("📑 Files")
+        t_files.setProperty("class", "metric-title")
+        self.val_files = QLabel("0 files")
+        self.val_files.setProperty("class", "metric-value")
+        l_files.addWidget(t_files)
+        l_files.addWidget(self.val_files)
+        metrics_grid.addWidget(c_files, 0, 2)
+
+        # Time Card
+        c_time = QFrame()
+        c_time.setProperty("class", "metric-card")
+        l_time = QVBoxLayout(c_time)
+        l_time.setContentsMargins(6, 4, 6, 4)
+        t_time = QLabel("⏱️ Time Elapsed")
+        t_time.setProperty("class", "metric-title")
+        self.val_time = QLabel("00:00")
+        self.val_time.setProperty("class", "metric-value")
+        l_time.addWidget(t_time)
+        l_time.addWidget(self.val_time)
+        metrics_grid.addWidget(c_time, 0, 3)
+
+        progress_layout.addLayout(metrics_grid)
+
+        # Action Buttons Row
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(12)
+
+        self.start_button = QPushButton("▶  Start Download")
+        self.start_button.setProperty("class", "btn-start")
+        self.start_button.clicked.connect(self.start_download)
+
+        self.stop_button = QPushButton("⏹  Stop")
+        self.stop_button.setProperty("class", "btn-stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_download)
+
+        actions_row.addWidget(self.start_button, 3)
+        actions_row.addWidget(self.stop_button, 1)
+        progress_layout.addLayout(actions_row)
+
+        main_layout.addWidget(progress_card)
+
+        # 5. Activity Log Card
+        log_card = QFrame()
+        log_card.setProperty("class", "card")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(14, 12, 14, 12)
+        log_layout.setSpacing(8)
+
+        log_header = QHBoxLayout()
+        log_title = QLabel("Activity Log")
+        log_title.setProperty("class", "section-title")
+        log_header.addWidget(log_title)
+        log_header.addStretch()
+
+        self.log_filter = QLineEdit()
+        self.log_filter.setPlaceholderText("Filter logs...")
+        self.log_filter.setFixedWidth(180)
+        self.log_filter.textChanged.connect(self.filter_logs)
+        log_header.addWidget(self.log_filter)
+
+        btn_copy = QPushButton("Copy")
+        btn_copy.clicked.connect(self.copy_log)
+        btn_clear = QPushButton("Clear")
+        btn_clear.clicked.connect(self.clear_log)
+        log_header.addWidget(btn_copy)
+        log_header.addWidget(btn_clear)
+        log_layout.addLayout(log_header)
+
+        self.log_box = QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMinimumHeight(130)
+        log_layout.addWidget(self.log_box)
+
+        main_layout.addWidget(log_card)
+
+        self.all_log_lines: list[str] = []
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(main_widget)
+        self.setCentralWidget(scroll)
+
+    def get_app_key(self) -> str:
+        return os.getenv("DROPBOX_APP_KEY", "").strip()
+
+    def is_logged_in(self) -> bool:
+        return bool(self.current_refresh_token or self.current_access_token)
+
+    def update_account_ui(self):
+        if self.is_logged_in():
+            display_name = self.current_user_name or "Connected User"
+            email = self.current_user_email or "OAuth Account"
+            self.account_name_label.setText(f"👤 {display_name}")
+            self.account_sub_label.setText(f"Email: {email} • Connected via Dropbox OAuth (PKCE)")
+            self.account_sub_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            self.set_auth_badge("● Connected", "connected")
+            self.btn_oauth_login.setText("🔄  Switch Account")
+            self.btn_oauth_login.setProperty("class", "btn-secondary")
+            self.btn_oauth_login.style().unpolish(self.btn_oauth_login)
+            self.btn_oauth_login.style().polish(self.btn_oauth_login)
+            self.btn_logout.setVisible(True)
+        else:
+            self.account_name_label.setText("No Dropbox account connected")
+            self.account_sub_label.setText("Sign in to your Dropbox account to inspect and download shared links.")
+            self.account_sub_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            self.set_auth_badge("○ Not Logged In", "neutral")
+            self.btn_oauth_login.setText("🌐  Log In with Dropbox")
+            self.btn_oauth_login.setProperty("class", "btn-primary")
+            self.btn_oauth_login.style().unpolish(self.btn_oauth_login)
+            self.btn_oauth_login.style().polish(self.btn_oauth_login)
+            self.btn_logout.setVisible(False)
+
+    def load_settings(self):
+        saved_dest = str(self.settings.value("destination", str(Path.home() / "Downloads")))
+        if saved_dest:
+            self.destination_input.setText(saved_dest)
+
+        saved_refresh = str(self.settings.value("oauth_refresh_token", "")).strip()
+        saved_access = str(self.settings.value("oauth_access_token", "")).strip()
+        saved_name = str(self.settings.value("user_name", "")).strip()
+        saved_email = str(self.settings.value("user_email", "")).strip()
+
+        self.settings.remove("token")
+
+        if saved_refresh or saved_access:
+            self.current_refresh_token = saved_refresh
+            self.current_access_token = saved_access
+            self.current_user_name = saved_name
+            self.current_user_email = saved_email
+            self.update_account_ui()
+            QTimer.singleShot(400, self.verify_saved_session)
+        else:
+            self.update_account_ui()
+
+    def verify_saved_session(self):
+        if not self.is_logged_in():
+            return
+        try:
+            dbx = create_dropbox_client(
+                access_token=self.current_access_token,
+                refresh_token=self.current_refresh_token,
+                app_key=self.get_app_key(),
+            )
+            account: Any = dbx.users_get_current_account()
+            if account and hasattr(account, "name") and account.name:
+                self.current_user_name = account.name.display_name
+                self.current_user_email = account.email
+                self.save_settings()
+                self.update_account_ui()
+                self.add_log(f"🔑 Restored session: {account.name.display_name} <{account.email}>")
+        except Exception as exc:
+            self.add_log(f"⚠ Saved session could not be verified ({exc}). Please sign in again if needed.")
+
+    def save_settings(self):
+        self.settings.setValue("destination", self.destination_input.text().strip())
+        if self.current_refresh_token:
+            self.settings.setValue("oauth_refresh_token", self.current_refresh_token)
+        else:
+            self.settings.remove("oauth_refresh_token")
+
+        if self.current_access_token:
+            self.settings.setValue("oauth_access_token", self.current_access_token)
+        else:
+            self.settings.remove("oauth_access_token")
+
+        if self.current_user_name:
+            self.settings.setValue("user_name", self.current_user_name)
+        else:
+            self.settings.remove("user_name")
+
+        if self.current_user_email:
+            self.settings.setValue("user_email", self.current_user_email)
+        else:
+            self.settings.remove("user_email")
+
+    def login_with_dropbox(self):
+        app_key = self.get_app_key()
+
+        if not app_key:
+            key, ok = ModernInputDialog.get_text(
+                self,
+                title="Dropbox App Key Required",
+                heading="Dropbox App Key (Client ID) Required",
+                message=(
+                    "DROPBOX_APP_KEY was not found in your .env file.\n\n"
+                    "Please enter your Dropbox App Key from https://www.dropbox.com/developers/apps:\n"
+                    "(To avoid this prompt in the future, set DROPBOX_APP_KEY=... in your .env file)"
+                ),
+                placeholder="Paste your Dropbox App Key here...",
+                confirm_text="Continue",
+            )
+            if not ok or not key:
+                return
+            app_key = key
+
+        try:
+            flow = dropbox.DropboxOAuth2FlowNoRedirect(
+                consumer_key=app_key,
+                consumer_secret=None,
+                use_pkce=True,
+                token_access_type="offline",
+            )
+            authorize_url = flow.start()
+            webbrowser.open(authorize_url)
+
+            code, ok = ModernInputDialog.get_text(
+                self,
+                title="Authorize Dropbox Account",
+                heading="Authorize Your Dropbox Account",
+                message=(
+                    "Your browser has opened the Dropbox authorization page:\n\n"
+                    "1. Sign into ANY Dropbox account in the opened browser window.\n"
+                    "2. Click 'Allow' to grant folder read permissions.\n"
+                    "3. Copy the authorization code shown on screen and paste it below:"
+                ),
+                placeholder="Paste Dropbox authorization code here...",
+                confirm_text="Authorize & Sign In",
+            )
+            if not ok or not code:
+                return
+
+            oauth_res: Any = flow.finish(code)
+            access_token = getattr(oauth_res, "access_token", None) or ""
+            refresh_token = getattr(oauth_res, "refresh_token", None) or ""
+
+            dbx = create_dropbox_client(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                app_key=app_key,
+            )
+            account: Any = dbx.users_get_current_account()
+            user_name = account.name.display_name if account and hasattr(account, "name") and account.name else "Dropbox User"
+            user_email = account.email if account and hasattr(account, "email") else ""
+
+            self.current_access_token = access_token
+            self.current_refresh_token = refresh_token
+            self.current_user_name = user_name
+            self.current_user_email = user_email
+
+            self.save_settings()
+            self.update_account_ui()
+            self.add_log(f"✓ Successfully authenticated as {user_name} <{user_email}> via Dropbox OAuth!")
+
+            if self.url_input.text().strip():
+                self.start_scan()
+
+        except Exception as exc:
+            ModernMessageBox.error(
+                self,
+                "Login Failed",
+                f"Could not complete Dropbox authorization:\n\n{exc}"
+            )
+
+    def logout_dropbox(self):
+        confirmed = ModernMessageBox.question(
+            self,
+            "Sign Out",
+            "Are you sure you want to sign out of your Dropbox account?",
+            yes_text="Sign Out",
+            no_text="Cancel",
+            is_destructive=True,
+        )
+        if confirmed:
+            self.current_access_token = ""
+            self.current_refresh_token = ""
+            self.current_user_name = ""
+            self.current_user_email = ""
+            self.settings.remove("oauth_refresh_token")
+            self.settings.remove("oauth_access_token")
+            self.settings.remove("user_name")
+            self.settings.remove("user_email")
+            self.settings.remove("token")
+            self.update_account_ui()
+            self.add_log("Logged out of Dropbox account.")
+
+    def toggle_pwd_visibility(self):
+        if self.link_password_input.echoMode() == QLineEdit.EchoMode.Password:
+            self.link_password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.btn_toggle_pwd.setText("Hide")
+        else:
+            self.link_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_toggle_pwd.setText("Show")
+
+    def on_url_text_changed(self, text: str):
+        text = text.strip()
+        if "dropbox.com" in text and ("http://" in text or "https://" in text):
+            self.auto_scan_timer.start(700)
+
+    def auto_scan_if_valid(self):
+        url = self.url_input.text().strip()
+        if "dropbox.com" in url and ("http://" in url or "https://" in url) and self.is_logged_in():
+            self.start_scan()
+
+    def paste_url(self):
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip()
+        if text:
+            self.url_input.setText(text)
+            self.start_scan()
+
+    def clear_url_and_tree(self):
+        self.url_input.clear()
+        self.tree_widget.clear()
+        self.selection_summary_label.setText("(Paste link to inspect folders)")
+
+    def browse_destination(self):
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Local Download Destination",
+            self.destination_input.text().strip() or str(Path.home()),
+        )
+        if folder:
+            self.destination_input.setText(folder)
+            self.save_settings()
+
+    def open_destination_folder(self):
+        dest = self.destination_input.text().strip()
+        if dest and os.path.exists(dest):
+            os.startfile(dest)
+        else:
+            ModernMessageBox.information(self, "Notice", "Download destination folder does not exist yet.")
+
+    # ==========================================================================
+    # Folder Scanning & Tree Population
+    # ==========================================================================
+    def start_scan(self):
+        url = self.url_input.text().strip()
+        password = self.link_password_input.text().strip()
+
+        if not self.is_logged_in():
+            confirmed = ModernMessageBox.question(
+                self,
+                "Dropbox Login Required",
+                "You need to sign into your Dropbox account to inspect shared folders.\n\n"
+                "Would you like to log in now?",
+                yes_text="Log In Now",
+                no_text="Cancel",
+            )
+            if confirmed:
+                self.login_with_dropbox()
+            return
+
+        if not url:
+            ModernMessageBox.warning(self, "Missing URL", "Please enter or paste a valid Dropbox shared link.")
+            self.url_input.setFocus()
+            return
+
+        self.btn_scan_url.setEnabled(False)
+        self.btn_scan_url.setText("⏳ Loading...")
+        self.set_selection_summary("⏳ Scanning folder contents via Dropbox API...", "active")
+        self.add_log(f"🔍 Inspecting folder hierarchy for: {url}")
+
+        self.tree_widget.clear()
+        loading_item = QTreeWidgetItem(self.tree_widget, ["⏳ Loading folders from Dropbox...", "", ""])
+        loading_item.setFlags(loading_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+
+        self.scan_thread = QThread()
+        self.scan_worker = ScanWorker(
+            url=url,
+            access_token=self.current_access_token,
+            refresh_token=self.current_refresh_token,
+            app_key=self.get_app_key(),
+            password=password,
+        )
+        self.scan_worker.moveToThread(self.scan_thread)
+
+        self.scan_thread.started.connect(self.scan_worker.run)
+        self.scan_worker.status.connect(lambda s: self.set_selection_summary(f"⏳ {s}", "active"))
+        self.scan_worker.finished.connect(self.on_scan_finished)
+        self.scan_worker.failed.connect(self.on_scan_failed)
+
+        self.scan_thread.start()
+
+    def on_scan_finished(self, tree_dict: dict, root_name: str, entries: list):
+        self.btn_scan_url.setEnabled(True)
+        self.btn_scan_url.setText("🔍 Load Folders")
+
+        if self.scan_thread:
+            self.scan_thread.quit()
+            self.scan_thread.wait()
+
+        self._tree_items_data = entries
+        self.populate_tree_widget(tree_dict, root_name)
+
+        folders_count = sum(1 for e in entries if e.get("is_dir"))
+        files_count = sum(1 for e in entries if not e.get("is_dir"))
+        total_size = sum(e.get("size", 0) for e in entries if not e.get("is_dir"))
+
+        self.add_log(f"✓ Found {len(entries)} items ({folders_count} folder(s), {files_count} file(s), {format_bytes(total_size)})")
+        self.update_selection_summary()
+
+    def on_scan_failed(self, error: str):
+        self.btn_scan_url.setEnabled(True)
+        self.btn_scan_url.setText("🔍 Load Folders")
+
+        if self.scan_thread:
+            self.scan_thread.quit()
+            self.scan_thread.wait()
+
+        self.tree_widget.clear()
+        self.set_selection_summary("⚠️ Scan failed", "error")
+        self.add_log(f"⚠️ Scan error: {error}")
+
+        if "password" in error.lower():
+            ModernMessageBox.information(
+                self,
+                "Password Protected Folder",
+                "This Dropbox folder is password-protected.\n\n"
+                "Please enter the link password in the Folder Password field."
+            )
+            self.link_password_input.setFocus()
+        else:
+            ModernMessageBox.warning(self, "Folder Scan Error", f"Could not inspect folders:\n\n{error}")
+
+    def populate_tree_widget(self, tree_dict: dict, root_name: str):
+        self._updating_tree = True
+        self.tree_widget.clear()
+
+        def add_item_recursive(parent_item: QTreeWidgetItem | None, node_data: dict[str, Any]):
+            name = node_data["name"]
+            is_dir = node_data["is_dir"]
+            size: int = int(node_data.get("size") or 0)
+            total_size: int = int(node_data.get("total_size") or size)
+            children_count = len(node_data.get("children", {}))
+
+            if is_dir:
+                icon_str = "📁 "
+                type_str = f"Folder ({children_count} items)" if children_count > 0 else "Folder"
+                size_str = format_bytes(total_size) if total_size > 0 else ""
+            else:
+                type_str, icon_str = get_file_type_and_icon(name)
+                size_str = format_bytes(size) if size > 0 else "0 B"
+
+            item = QTreeWidgetItem([f"{icon_str}{name}", type_str, size_str])
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setData(0, Qt.ItemDataRole.UserRole, node_data["path"])
+            item.setData(1, Qt.ItemDataRole.UserRole, is_dir)
+            item.setData(2, Qt.ItemDataRole.UserRole, size if not is_dir else total_size)
+            item.setData(3, Qt.ItemDataRole.UserRole, name)
+            item.setToolTip(0, f"{'Folder' if is_dir else 'File'}: {node_data['path'] or name}")
+
+            if parent_item is None:
+                self.tree_widget.addTopLevelItem(item)
+            else:
+                parent_item.addChild(item)
+
+            for child_name, child_data in sorted(
+                node_data["children"].items(),
+                key=lambda x: (not x[1]["is_dir"], x[0].lower())
+            ):
+                add_item_recursive(item, child_data)
+
+        if tree_dict["children"]:
+            for child_name, child_data in sorted(
+                tree_dict["children"].items(),
+                key=lambda x: (not x[1]["is_dir"], x[0].lower())
+            ):
+                add_item_recursive(None, child_data)
+        else:
+            single_item = QTreeWidgetItem([f"📁 {root_name}", "Folder", ""])
+            single_item.setCheckState(0, Qt.CheckState.Checked)
+            single_item.setFlags(single_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            single_item.setData(0, Qt.ItemDataRole.UserRole, root_name)
+            single_item.setData(1, Qt.ItemDataRole.UserRole, True)
+            single_item.setData(2, Qt.ItemDataRole.UserRole, 0)
+            single_item.setData(3, Qt.ItemDataRole.UserRole, root_name)
+            single_item.setToolTip(0, f"Folder: {root_name}")
+            self.tree_widget.addTopLevelItem(single_item)
+
+        self.tree_widget.collapseAll()
+        self._updating_tree = False
+        self.update_selection_summary()
+
+    def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
+        is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
+        if is_dir and item.childCount() > 0:
+            pos = self.tree_widget.viewport().mapFromGlobal(QCursor.pos())
+            rect = self.tree_widget.visualItemRect(item)
+            if column != 0 or pos.x() > (rect.x() + 24):
+                item.setExpanded(not item.isExpanded())
+
+    def on_tree_item_expanded(self, item: QTreeWidgetItem):
+        is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
+        if is_dir:
+            raw_name = item.data(3, Qt.ItemDataRole.UserRole)
+            if raw_name:
+                item.setText(0, f"📂 {raw_name}")
+            self.on_tree_current_item_changed(item, None)
+
+    def on_tree_item_collapsed(self, item: QTreeWidgetItem):
+        is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
+        if is_dir:
+            raw_name = item.data(3, Qt.ItemDataRole.UserRole)
+            if raw_name:
+                item.setText(0, f"📁 {raw_name}")
+            self.on_tree_current_item_changed(item, None)
+
+    def on_tree_current_item_changed(self, current: QTreeWidgetItem | None, previous: QTreeWidgetItem | None = None):
+        if not current:
+            return
+        is_dir = bool(current.data(1, Qt.ItemDataRole.UserRole))
+        raw_name = current.data(3, Qt.ItemDataRole.UserRole) or current.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "")
+        if is_dir:
+            child_count = current.childCount()
+            size = int(current.data(2, Qt.ItemDataRole.UserRole) or 0)
+            size_str = f" • {format_bytes(size)}" if size > 0 else ""
+            status = "open — click to collapse" if current.isExpanded() else "closed — click to expand"
+            self.tree_hint.setText(f"📁 Folder: {raw_name} ({child_count} items{size_str}) [{status}]")
+            self.tree_hint.setStyleSheet("font-size: 11px; color: #38bdf8; font-weight: 500;")
+        else:
+            size = int(current.data(2, Qt.ItemDataRole.UserRole) or 0)
+            self.tree_hint.setText(f"📄 File: {raw_name} ({format_bytes(size) if size > 0 else '0 B'})")
+            self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
+
+    def on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        if column != 0 or self._updating_tree:
+            return
+
+        self._updating_tree = True
+        try:
+            state = item.checkState(0)
+            if state != Qt.CheckState.PartiallyChecked:
+                self._propagate_check_down(item, state)
+
+            self._update_ancestors(item)
+        finally:
+            self._updating_tree = False
+
+        self.update_selection_summary()
+
+    def _propagate_check_down(self, item: QTreeWidgetItem, state: Qt.CheckState):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child is not None:
+                child.setCheckState(0, state)
+                self._propagate_check_down(child, state)
+
+    def _update_ancestors(self, item: QTreeWidgetItem):
+        parent = item.parent()
+        if not parent:
+            return
+
+        checked_count = 0
+        partial_count = 0
+        total = parent.childCount()
+
+        for i in range(total):
+            child = parent.child(i)
+            if child is None:
+                continue
+            c_state = child.checkState(0)
+            if c_state == Qt.CheckState.Checked:
+                checked_count += 1
+            elif c_state == Qt.CheckState.PartiallyChecked:
+                partial_count += 1
+
+        if checked_count == total:
+            parent.setCheckState(0, Qt.CheckState.Checked)
+        elif checked_count == 0 and partial_count == 0:
+            parent.setCheckState(0, Qt.CheckState.Unchecked)
+        else:
+            parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+
+        self._update_ancestors(parent)
+
+    def select_all_items(self):
+        self._updating_tree = True
+        for i in range(self.tree_widget.topLevelItemCount()):
+            top = self.tree_widget.topLevelItem(i)
+            if top is not None:
+                top.setCheckState(0, Qt.CheckState.Checked)
+                self._propagate_check_down(top, Qt.CheckState.Checked)
+        self._updating_tree = False
+        self.update_selection_summary()
+
+    def deselect_all_items(self):
+        self._updating_tree = True
+        for i in range(self.tree_widget.topLevelItemCount()):
+            top = self.tree_widget.topLevelItem(i)
+            if top is not None:
+                top.setCheckState(0, Qt.CheckState.Unchecked)
+                self._propagate_check_down(top, Qt.CheckState.Unchecked)
+        self._updating_tree = False
+        self.update_selection_summary()
+
+    def update_selection_summary(self):
+        total_items = 0
+        selected_items = 0
+        selected_bytes = 0
+
+        def count_recursive(item: QTreeWidgetItem | None):
+            nonlocal total_items, selected_items, selected_bytes
+            if item is None:
+                return
+            total_items += 1
+            state = item.checkState(0)
+            is_dir = item.data(1, Qt.ItemDataRole.UserRole)
+            size = int(item.data(2, Qt.ItemDataRole.UserRole) or 0)
+
+            if state == Qt.CheckState.Checked:
+                selected_items += 1
+                if not is_dir:
+                    selected_bytes += size
+            elif state == Qt.CheckState.PartiallyChecked:
+                selected_items += 1
+
+            for i in range(item.childCount()):
+                count_recursive(item.child(i))
+
+        for i in range(self.tree_widget.topLevelItemCount()):
+            count_recursive(self.tree_widget.topLevelItem(i))
+
+        if total_items == 0:
+            self.selection_summary_label.setText("(No items scanned yet)")
+            self.selection_summary_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        else:
+            summary_txt = f"{selected_items} of {total_items} items selected"
+            if selected_bytes > 0:
+                summary_txt += f" • {format_bytes(selected_bytes)}"
+            self.selection_summary_label.setText(summary_txt)
+            self.selection_summary_label.setStyleSheet("font-size: 11px; color: #10b981; font-weight: 600;")
+
+    def get_tree_selection_info(self) -> dict[str, Any]:
+        selected_files = set()
+        deselected_files = set()
+        selected_folders = set()
+        deselected_folders = set()
+        total_files = 0
+        total_selected_files = 0
+        has_tree_items = self.tree_widget.topLevelItemCount() > 0
+
+        def traverse(item: QTreeWidgetItem | None, parent_path=""):
+            nonlocal total_files, total_selected_files
+            if item is None:
+                return
+            is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
+            raw_name = item.data(3, Qt.ItemDataRole.UserRole) or item.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "").strip()
+            item_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
+
+            current_path = f"{parent_path}/{raw_name}".strip("/") if parent_path else raw_name
+            state = item.checkState(0)
+
+            if is_dir:
+                if state == Qt.CheckState.Checked:
+                    if item_path:
+                        selected_folders.add(item_path)
+                    selected_folders.add(current_path)
+                elif state == Qt.CheckState.Unchecked:
+                    if item_path:
+                        deselected_folders.add(item_path)
+                    deselected_folders.add(current_path)
+
+                for i in range(item.childCount()):
+                    traverse(item.child(i), current_path)
+            else:
+                total_files += 1
+                if state == Qt.CheckState.Checked:
+                    total_selected_files += 1
+                    if item_path:
+                        selected_files.add(item_path)
+                    selected_files.add(current_path)
+                else:
+                    if item_path:
+                        deselected_files.add(item_path)
+                    deselected_files.add(current_path)
+
+        for i in range(self.tree_widget.topLevelItemCount()):
+            traverse(self.tree_widget.topLevelItem(i))
+
+        return {
+            "selected_files": selected_files,
+            "deselected_files": deselected_files,
+            "selected_folders": selected_folders,
+            "deselected_folders": deselected_folders,
+            "total_files": total_files,
+            "selected_file_count": total_selected_files,
+            "has_tree_items": has_tree_items,
+        }
+
+    # ==========================================================================
+    # Download Execution
+    # ==========================================================================
+    def add_log(self, text: str):
+        timestamp = time.strftime("%H:%M:%S")
+        formatted = f"[{timestamp}] {text}"
+        self.all_log_lines.append(formatted)
+        filter_text = self.log_filter.text().strip().lower()
+        if not filter_text or filter_text in formatted.lower():
+            self.log_box.appendPlainText(formatted)
+            self.log_box.moveCursor(QTextCursor.MoveOperation.End)
+
+    def filter_logs(self, text: str):
+        filter_text = text.strip().lower()
+        self.log_box.clear()
+        if not filter_text:
+            for line in self.all_log_lines:
+                self.log_box.appendPlainText(line)
+        else:
+            for line in self.all_log_lines:
+                if filter_text in line.lower():
+                    self.log_box.appendPlainText(line)
+        self.log_box.moveCursor(QTextCursor.MoveOperation.End)
+
+    def clear_log(self):
+        self.all_log_lines.clear()
+        self.log_box.clear()
+
+    def copy_log(self):
+        QApplication.clipboard().setText(self.log_box.toPlainText())
+        self.set_status_badge("● Log Copied", "success")
+
+    def set_running(self, running: bool):
+        self.start_button.setEnabled(not running)
+        self.stop_button.setEnabled(running)
+        self.url_input.setEnabled(not running)
+        self.destination_input.setEnabled(not running)
+        self.link_password_input.setEnabled(not running)
+        self.btn_oauth_login.setEnabled(not running)
+        self.btn_logout.setEnabled(not running)
+        self.btn_scan_url.setEnabled(not running)
+        self.tree_widget.setEnabled(not running)
+
+        if running:
+            self.set_status_badge("● Downloading...", "running")
+        else:
+            self.set_status_badge("● Ready", "ready")
+
+    def start_download(self):
+        url = self.url_input.text().strip()
+        destination = self.destination_input.text().strip()
+        skip_existing = self.check_skip_existing.isChecked()
+        link_password = self.link_password_input.text().strip()
+
+        if not self.is_logged_in():
+            confirmed = ModernMessageBox.question(
+                self,
+                "Dropbox Login Required",
+                "You need to log into your Dropbox account to download files.\n\n"
+                "Would you like to log in now?",
+                yes_text="Log In Now",
+                no_text="Cancel",
+            )
+            if confirmed:
+                self.login_with_dropbox()
+            return
+
+        if not url:
+            ModernMessageBox.warning(self, "Missing URL", "Please enter a Dropbox shared link.")
+            self.url_input.setFocus()
+            return
+
+        if not destination:
+            ModernMessageBox.warning(self, "Missing Destination", "Please choose a local save destination.")
+            return
+
+        info = self.get_tree_selection_info()
+        if info["has_tree_items"]:
+            if info["total_files"] > 0 and info["selected_file_count"] == 0:
+                ModernMessageBox.warning(
+                    self,
+                    "No Items Selected",
+                    "All files in the tree are deselected.\n\n"
+                    "Please check at least one folder or file to download.",
+                )
+                return
+            if info["total_files"] == 0 and not info["selected_folders"]:
+                ModernMessageBox.warning(
+                    self,
+                    "No Items Selected",
+                    "All items in the tree are deselected.\n\n"
+                    "Please check at least one item to download.",
+                )
+                return
+
+        self.save_settings()
+
+        self.file_progress.setValue(0)
+        self.overall_progress.setValue(0)
+        self.file_pct_label.setText("0%")
+        self.overall_pct_label.setText("0%")
+        self.folder_label.setText("Initializing...")
+        self.file_label.setText("Connecting to Dropbox API...")
+        self.val_speed.setText("0 B/s")
+        self.val_data.setText("0 B")
+        self.val_files.setText("0 files")
+        self.val_time.setText("00:00")
+
+        self.set_running(True)
+        self.add_log("▶ Starting selective download via Dropbox API...")
+        if info["has_tree_items"] and info["total_files"] > 0:
+            self.add_log(f"📋 Selection: {info['selected_file_count']} of {info['total_files']} files selected for download.")
+
+        self.download_thread = QThread()
+        self.worker = DownloadWorker(
+            url=url,
+            destination=destination,
+            access_token=self.current_access_token,
+            refresh_token=self.current_refresh_token,
+            app_key=self.get_app_key(),
+            link_password=link_password,
+            skip_existing=skip_existing,
+            selected_files=info["selected_files"],
+            deselected_files=info["deselected_files"],
+            selected_folders=info["selected_folders"],
+            deselected_folders=info["deselected_folders"],
+            has_tree_filter=info["has_tree_items"],
+        )
+
+        self.worker.moveToThread(self.download_thread)
+        self.download_thread.started.connect(self.worker.run)
+
+        self.worker.log.connect(self.add_log)
+        self.worker.folder_changed.connect(lambda txt: self.folder_label.setText(txt))
+        self.worker.file_changed.connect(lambda txt: self.file_label.setText(txt))
+        self.worker.current_progress.connect(self.update_file_progress)
+        self.worker.overall_progress.connect(self.update_overall_progress)
+        self.worker.stats_changed.connect(self.update_stats)
+
+        self.worker.finished.connect(self.download_finished)
+        self.worker.failed.connect(self.download_failed)
+
+        self.download_thread.start()
+
+    def update_file_progress(self, val: int):
+        self.file_progress.setValue(val)
+        self.file_pct_label.setText(f"{val}%")
+
+    def update_overall_progress(self, val: int):
+        self.overall_progress.setValue(val)
+        self.overall_pct_label.setText(f"{val}%")
+
+    def update_stats(self, stats: dict):
+        if "speed" in stats:
+            self.val_speed.setText(stats["speed"])
+        if "data" in stats:
+            self.val_data.setText(stats["data"])
+        if "files" in stats:
+            self.val_files.setText(stats["files"])
+        if "elapsed" in stats:
+            self.val_time.setText(stats["elapsed"])
+
+    def stop_download(self):
+        if self.worker:
+            self.worker.stop()
+            self.add_log("⏹ Stop requested. Terminating gracefully...")
+            self.set_status_badge("● Stopping...", "warning")
+
+    def download_finished(self, message: str):
+        self.set_running(False)
+        self.add_log(f"\n{message}")
+        self.set_status_badge("● Complete", "success")
+
+        if self.download_thread:
+            self.download_thread.quit()
+            self.download_thread.wait()
+
+        ModernMessageBox.information(self, "Download Complete", message)
+
+    def download_failed(self, error: str):
+        self.set_running(False)
+        self.add_log(f"\n❌ FAILED: {error}")
+        self.set_status_badge("● Error", "error")
+
+        if self.download_thread:
+            self.download_thread.quit()
+            self.download_thread.wait()
+
+        ModernMessageBox.error(self, "Download Failed", error)
+
+    def closeEvent(self, event):
+        self.save_settings()
+        if self.worker and self.download_thread and self.download_thread.isRunning():
+            self.worker.stop()
+            self.download_thread.quit()
+            self.download_thread.wait()
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.quit()
+            self.scan_thread.wait()
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_STYLESHEET)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
