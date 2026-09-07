@@ -5,6 +5,7 @@ import re
 import json
 import threading
 import webbrowser
+import hashlib
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from typing import Any
@@ -19,6 +20,11 @@ except ImportError:
 import dropbox
 from dropbox.files import FileMetadata, FolderMetadata, SharedLink
 from dropbox.exceptions import ApiError, AuthError
+
+try:
+    from dropbox.content_hash import DropboxContentHasher
+except ImportError:
+    DropboxContentHasher = None
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QSettings, QTimer
 from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor
@@ -727,6 +733,54 @@ def natural_sort_path_key(item: Any) -> list:
     return [natural_sort_key(part) for part in parts]
 
 
+def compute_dropbox_content_hash(
+    path: Path,
+    check_pause_func: Any = None,
+    progress_cb: Any = None,
+    stop_check_func: Any = None,
+) -> str:
+    """Compute the Dropbox-compatible SHA-256 block hash for a local file to verify integrity."""
+    if not path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    block_size = 4 * 1024 * 1024  # 4 MB blocks
+    file_size = path.stat().st_size
+    read_bytes = 0
+
+    if DropboxContentHasher is not None:
+        hasher = DropboxContentHasher()
+        with open(path, "rb") as f:
+            while True:
+                if stop_check_func and stop_check_func():
+                    return ""
+                if check_pause_func:
+                    check_pause_func()
+                chunk = f.read(block_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                read_bytes += len(chunk)
+                if progress_cb and file_size > 0:
+                    progress_cb(int(read_bytes * 100 / file_size))
+        return hasher.hexdigest()
+    else:
+        block_hashes = b""
+        with open(path, "rb") as f:
+            while True:
+                if stop_check_func and stop_check_func():
+                    return ""
+                if check_pause_func:
+                    check_pause_func()
+                chunk = f.read(block_size)
+                if not chunk:
+                    break
+                block_hashes += hashlib.sha256(chunk).digest()
+                read_bytes += len(chunk)
+                if progress_cb and file_size > 0:
+                    progress_cb(int(read_bytes * 100 / file_size))
+        return hashlib.sha256(block_hashes).hexdigest()
+
+
 def build_tree_hierarchy(entries: list, root_name: str = "DropboxFolder") -> dict[str, Any]:
     root: dict[str, Any] = {
         "name": root_name,
@@ -765,10 +819,12 @@ def build_tree_hierarchy(entries: list, root_name: str = "DropboxFolder") -> dic
                     "file_count": 0,
                     "folder_count": 0,
                     "children": {},
+                    "content_hash": item.get("content_hash") if is_last else None,
                 }
             elif is_last:
                 children[part]["is_dir"] = item["is_dir"]
                 children[part]["size"] = item.get("size", 0)
+                children[part]["content_hash"] = item.get("content_hash")
             curr = children[part]
 
     def compute_metrics(node: dict[str, Any]) -> tuple[int, int]:
@@ -1046,7 +1102,8 @@ class ScanWorker(QObject):
                             continue
                         rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
                         size = getattr(e, "size", 0) if not is_dir else 0
-                        entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size})
+                        item_hash = getattr(e, "content_hash", None) if not is_dir else None
+                        entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size, "content_hash": item_hash})
                         if is_dir:
                             next_api = f"{api_path}/{name}" if api_path else f"/{name}"
                             subfolders_to_visit.append((next_api, rel))
@@ -1065,7 +1122,8 @@ class ScanWorker(QObject):
                                 continue
                             rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
                             size = getattr(e, "size", 0) if not is_dir else 0
-                            entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size})
+                            item_hash = getattr(e, "content_hash", None) if not is_dir else None
+                            entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size, "content_hash": item_hash})
                             if is_dir:
                                 next_api = f"{api_path}/{name}" if api_path else f"/{name}"
                                 subfolders_to_visit.append((next_api, rel))
@@ -1099,6 +1157,7 @@ class DownloadFileItem:
     rel_path: str
     api_path: str
     metadata: Any = None
+    content_hash: str | None = None
 
     @property
     def _custom_rel_path(self) -> str:
@@ -1135,6 +1194,9 @@ class DownloadWorker(QObject):
         selected_folders: set[str] | None = None,
         deselected_folders: set[str] | None = None,
         has_tree_filter: bool = False,
+        verify_integrity: bool = True,
+        auto_repair: bool = True,
+        verify_only: bool = False,
     ):
         super().__init__()
         self.url = url.strip()
@@ -1150,6 +1212,13 @@ class DownloadWorker(QObject):
         self.selected_folders = selected_folders or set()
         self.deselected_folders = deselected_folders or set()
         self.has_tree_filter = has_tree_filter
+        self.verify_integrity = verify_integrity
+        self.auto_repair = auto_repair
+        self.verify_only = verify_only
+        self.verified_ok = 0
+        self.corrupted = 0
+        self.repaired = 0
+        self.missing = 0
         self.stop_requested = False
         self._pause_event = threading.Event()
         self._pause_event.set()
@@ -1253,6 +1322,7 @@ class DownloadWorker(QObject):
             if isinstance(entry, FileMetadata):
                 entry_rel = f"{rel_dir}/{entry.name}".strip("/") if rel_dir else entry.name
                 entry_api = f"{api_path}/{entry.name}" if api_path else f"/{entry.name}"
+                entry_hash = getattr(entry, "content_hash", None)
                 self.files.append(
                     DownloadFileItem(
                         name=entry.name,
@@ -1260,6 +1330,7 @@ class DownloadWorker(QObject):
                         rel_path=entry_rel,
                         api_path=entry_api,
                         metadata=entry,
+                        content_hash=entry_hash,
                     )
                 )
 
@@ -1358,6 +1429,20 @@ class DownloadWorker(QObject):
             if actual != file_size:
                 temp_file.unlink(missing_ok=True)
                 raise IOError(f"size mismatch: expected {file_size}, got {actual}")
+
+            exp_hash = getattr(entry, "content_hash", None) or getattr(metadata, "content_hash", None)
+            if exp_hash:
+                calc = compute_dropbox_content_hash(
+                    temp_file,
+                    check_pause_func=self._check_pause,
+                    stop_check_func=lambda: self.stop_requested,
+                )
+                if not self.stop_requested and calc and calc.lower() != exp_hash.lower():
+                    temp_file.unlink(missing_ok=True)
+                    raise IOError(f"checksum mismatch: expected {exp_hash}, got {calc}")
+
+            if hasattr(entry, "content_hash") and not getattr(entry, "content_hash", None) and exp_hash:
+                entry.content_hash = exp_hash
 
             os.replace(temp_file, local_file)
             self.done += 1
@@ -1521,55 +1606,216 @@ class DownloadWorker(QObject):
                 self.log.emit("🚀 Starting direct selective download in sequential order...")
 
             if not files_to_download and total_selected > 0:
-                elapsed = max(time.time() - self.started - self.paused_duration, 0.1)
-                self.overall_progress.emit(100)
-                self.current_progress.emit(100)
-                message = (
-                    f"✓ Download Finished: All files already exist locally!\n\n"
-                    f"Files Selected: {total_selected}\n"
-                    f"Completed: 0 (Already downloaded)\n"
-                    f"Skipped: {self.skipped}\n"
-                    f"Errors: {self.errors}\n"
-                    f"Data Transferred: {format_bytes(self.bytes_done)}\n"
-                    f"Time Elapsed: {elapsed:.1f}s\n"
-                    f"Output Directory: {local_root}"
-                )
-                self.finished.emit(message)
-                return
+                if not self.verify_integrity:
+                    elapsed = max(time.time() - self.started - self.paused_duration, 0.1)
+                    self.overall_progress.emit(100)
+                    self.current_progress.emit(100)
+                    message = (
+                        f"✓ Download Finished: All files already exist locally!\n\n"
+                        f"Files Selected: {total_selected}\n"
+                        f"Completed: 0 (Already downloaded)\n"
+                        f"Skipped: {self.skipped}\n"
+                        f"Errors: {self.errors}\n"
+                        f"Data Transferred: {format_bytes(self.bytes_done)}\n"
+                        f"Time Elapsed: {elapsed:.1f}s\n"
+                        f"Output Directory: {local_root}"
+                    )
+                    self.finished.emit(message)
+                    return
+                else:
+                    self.log.emit("✓ All files detected locally. Proceeding to file integrity verification...")
 
-            initial_offset = total_selected - len(files_to_download)
+            if not self.verify_only:
+                initial_offset = total_selected - len(files_to_download)
 
-            for index, entry in enumerate(files_to_download, start=1):
-                self._check_pause()
-                if self.stop_requested:
-                    break
+                for index, entry in enumerate(files_to_download, start=1):
+                    self._check_pause()
+                    if self.stop_requested:
+                        break
 
-                current_index = initial_offset + index
-                self.overall_progress.emit(
-                    int((current_index - 1) * 100 / max(total_selected, 1))
-                )
+                    current_index = initial_offset + index
+                    self.overall_progress.emit(
+                        int((current_index - 1) * 100 / max(total_selected, 1))
+                    )
 
-                self.download_one(dbx, entry, local_root, total_files=total_selected)
+                    self.download_one(dbx, entry, local_root, total_files=total_selected)
 
-                self.overall_progress.emit(
-                    int(current_index * 100 / max(total_selected, 1))
-                )
+                    self.overall_progress.emit(
+                        int(current_index * 100 / max(total_selected, 1))
+                    )
+
+            # Verification Phase: Checks integrity of all selected files
+            if self.verify_integrity and not self.stop_requested and total_selected > 0:
+                self.log.emit("\n" + "=" * 60)
+                if self.verify_only:
+                    self.log.emit(f"🔍 Starting File Integrity Verification ({total_selected} file(s))...")
+                else:
+                    self.log.emit(f"🔍 Post-Download Verification: Checking {total_selected} file(s) for corruption...")
+                self.log.emit("🔍 Verifying exact file sizes and Dropbox SHA-256 block hashes...")
+                self.log.emit("=" * 60)
+                self.folder_changed.emit("Verifying Files...")
+                self.overall_progress.emit(0)
+
+                corrupted_items: list[tuple[DownloadFileItem, str]] = []
+
+                for v_idx, entry in enumerate(self.files, start=1):
+                    self._check_pause()
+                    if self.stop_requested:
+                        break
+
+                    rel_clean = entry.rel_path.replace("\\", "/").strip("/")
+                    folder_display = Path(rel_clean).parent.as_posix() if "/" in rel_clean else "/ (Root)"
+                    file_display = entry.name or Path(rel_clean).name
+
+                    self.folder_changed.emit(f"Verifying ({v_idx}/{total_selected}): [{folder_display}]")
+                    self.file_changed.emit(f"{file_display}  ({format_bytes(entry.size)})")
+                    self.current_progress.emit(0)
+
+                    local_file = safe_local_path(local_root, entry.rel_path)
+
+                    if not local_file.exists() or not local_file.is_file():
+                        self.missing += 1
+                        self.log.emit(f"❌ MISSING [{folder_display}] {file_display}: File not found on disk.")
+                        corrupted_items.append((entry, "file missing on disk"))
+                        continue
+
+                    actual_size = local_file.stat().st_size
+                    if actual_size != entry.size:
+                        self.corrupted += 1
+                        self.log.emit(
+                            f"❌ CORRUPTED [{folder_display}] {file_display}: Size mismatch! "
+                            f"(Expected {format_bytes(entry.size)}, got {format_bytes(actual_size)})"
+                        )
+                        corrupted_items.append((entry, f"size mismatch (expected {entry.size}, got {actual_size})"))
+                        continue
+
+                    # Hash check
+                    expected_hash = entry.content_hash or (getattr(entry.metadata, "content_hash", None) if entry.metadata else None)
+                    v_start_time = time.time()
+                    try:
+                        def on_v_prog(pct: int):
+                            self.current_progress.emit(pct)
+
+                        calc_hash = compute_dropbox_content_hash(
+                            local_file,
+                            check_pause_func=self._check_pause,
+                            progress_cb=on_v_prog,
+                            stop_check_func=lambda: self.stop_requested,
+                        )
+                        if self.stop_requested:
+                            break
+
+                        if expected_hash and calc_hash.lower() != expected_hash.lower():
+                            self.corrupted += 1
+                            self.log.emit(
+                                f"❌ CORRUPTED [{folder_display}] {file_display}: Checksum mismatch! "
+                                f"(Expected {expected_hash[:10]}..., got {calc_hash[:10]}...)"
+                            )
+                            corrupted_items.append((entry, "checksum mismatch"))
+                            continue
+
+                        self.verified_ok += 1
+                        self.current_progress.emit(100)
+                        hash_note = f" [Hash: {calc_hash[:8]}...]" if expected_hash else ""
+                        self.log.emit(f"✓ VERIFIED [{folder_display}] {file_display}{hash_note}")
+
+                    except Exception as err:
+                        self.corrupted += 1
+                        self.log.emit(f"❌ UNREADABLE [{folder_display}] {file_display}: {err}")
+                        corrupted_items.append((entry, f"unreadable: {err}"))
+
+                    self.overall_progress.emit(int(v_idx * 100 / total_selected))
+
+                    v_elapsed = max(time.time() - v_start_time, 0.001)
+                    v_speed = entry.size / v_elapsed
+                    active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
+                    self.stats_changed.emit({
+                        "speed": f"{format_bytes(int(v_speed))}/s (Verify)",
+                        "data": f"{format_bytes(self.bytes_done)}",
+                        "files": f"{self.verified_ok}/{total_selected} verified",
+                        "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
+                    })
+
+                # Auto-Repair Phase
+                if self.auto_repair and corrupted_items and not self.stop_requested and not self.verify_only:
+                    self.log.emit(f"\n🔧 Auto-Repair: Re-downloading {len(corrupted_items)} corrupted/missing file(s)...")
+                    for bad_entry, reason in corrupted_items:
+                        self._check_pause()
+                        if self.stop_requested:
+                            break
+
+                        rel_clean = bad_entry.rel_path.replace("\\", "/").strip("/")
+                        folder_display = Path(rel_clean).parent.as_posix() if "/" in rel_clean else "/ (Root)"
+                        file_display = bad_entry.name or Path(rel_clean).name
+
+                        self.log.emit(f"🔄 REPAIRING [{folder_display}] {file_display} ({reason})...")
+                        bad_path = safe_local_path(local_root, bad_entry.rel_path)
+                        bad_path.unlink(missing_ok=True)
+
+                        # Re-download
+                        self.download_one(dbx, bad_entry, local_root, total_files=total_selected)
+
+                        # Re-verify repaired file
+                        if bad_path.exists() and bad_path.is_file():
+                            try:
+                                repaired_size = bad_path.stat().st_size
+                                if repaired_size == bad_entry.size:
+                                    calc_h = compute_dropbox_content_hash(
+                                        bad_path,
+                                        check_pause_func=self._check_pause,
+                                        stop_check_func=lambda: self.stop_requested,
+                                    )
+                                    exp_h = bad_entry.content_hash or (getattr(bad_entry.metadata, "content_hash", None) if bad_entry.metadata else None)
+                                    if not exp_h or calc_h.lower() == exp_h.lower():
+                                        self.repaired += 1
+                                        if self.corrupted > 0:
+                                            self.corrupted -= 1
+                                        self.verified_ok += 1
+                                        self.log.emit(f"✓ REPAIRED [{folder_display}] {file_display}: Re-downloaded and verified intact!")
+                                        continue
+                            except Exception:
+                                pass
+                        self.log.emit(f"❌ REPAIR FAILED [{folder_display}] {file_display}: Still invalid after re-download.")
 
             elapsed = max(time.time() - self.started - self.paused_duration, 0.1)
 
             if self.stop_requested:
                 message = "Download cancelled by user."
             else:
-                message = (
-                    f"✓ Download Finished Successfully!\n\n"
-                    f"Files Selected: {total_selected}\n"
-                    f"Completed: {self.done}\n"
-                    f"Skipped: {self.skipped}\n"
-                    f"Errors: {self.errors}\n"
-                    f"Data Transferred: {format_bytes(self.bytes_done)}\n"
-                    f"Time Elapsed: {elapsed:.1f}s\n"
-                    f"Output Directory: {local_root}"
-                )
+                lines = []
+                if self.verify_only:
+                    if self.corrupted > 0 or self.missing > 0:
+                        lines.append("⚠️ Verification Completed with Warnings!")
+                    else:
+                        lines.append("✓ Verification Completed Successfully!")
+                elif self.verify_integrity:
+                    if self.corrupted > 0 or self.missing > 0 or self.errors > 0:
+                        lines.append("⚠️ Download Finished with Verification Warnings!")
+                    else:
+                        lines.append("✓ Download & Verification Finished Successfully!")
+                else:
+                    lines.append("✓ Download Finished Successfully!")
+
+                lines.append("")
+                lines.append(f"Files Selected: {total_selected}")
+                if not self.verify_only:
+                    lines.append(f"Completed: {self.done}")
+                    lines.append(f"Skipped: {self.skipped}")
+                if self.verify_integrity:
+                    lines.append(f"Verified Intact: {self.verified_ok} of {total_selected}")
+                    if self.repaired > 0:
+                        lines.append(f"Auto-Repaired: {self.repaired}")
+                    if self.corrupted > 0:
+                        lines.append(f"Corrupted: {self.corrupted}")
+                    if self.missing > 0:
+                        lines.append(f"Missing: {self.missing}")
+                if self.errors > 0:
+                    lines.append(f"Errors: {self.errors}")
+                if not self.verify_only:
+                    lines.append(f"Data Transferred: {format_bytes(self.bytes_done)}")
+                lines.append(f"Time Elapsed: {elapsed:.1f}s")
+                lines.append(f"Output Directory: {local_root}")
+                message = "\n".join(lines)
 
             self.finished.emit(message)
 
@@ -2089,6 +2335,7 @@ class MainWindow(QMainWindow):
         styles = {
             "ready": "background-color: #1e293b; color: #38bdf8; border: 1px solid #334155;",
             "running": "background-color: #0c2e59; color: #60a5fa; border: 1px solid #1d4ed8;",
+            "verifying": "background-color: #2e1065; color: #c084fc; border: 1px solid #7e22ce;",
             "success": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
             "warning": "background-color: #451a03; color: #fbbf24; border: 1px solid #d97706;",
             "error": "background-color: #450a0a; color: #f87171; border: 1px solid #b91c1c;",
@@ -2315,9 +2562,25 @@ class MainWindow(QMainWindow):
         target_layout.addLayout(dest_row)
 
         dest_opts_row = QHBoxLayout()
+        dest_opts_row.setSpacing(14)
         self.check_skip_existing = QCheckBox("Skip files that already exist locally (matching exact size)")
         self.check_skip_existing.setChecked(True)
+        self.check_skip_existing.setToolTip("Skip files that already exist on disk with the exact matching size.")
+        self.check_skip_existing.stateChanged.connect(lambda: self.save_settings())
         dest_opts_row.addWidget(self.check_skip_existing)
+
+        self.check_verify_integrity = QCheckBox("Verify file integrity after download (Dropbox checksum)")
+        self.check_verify_integrity.setChecked(True)
+        self.check_verify_integrity.setToolTip("Compute SHA-256 block hash of files and verify against Dropbox cloud checksum to guarantee 0% corruption.")
+        self.check_verify_integrity.stateChanged.connect(lambda: self.save_settings())
+        dest_opts_row.addWidget(self.check_verify_integrity)
+
+        self.check_auto_repair = QCheckBox("Auto re-download if file is corrupted")
+        self.check_auto_repair.setChecked(True)
+        self.check_auto_repair.setToolTip("Automatically delete and re-download any file that fails integrity check or has checksum mismatch.")
+        self.check_auto_repair.stateChanged.connect(lambda: self.save_settings())
+        dest_opts_row.addWidget(self.check_auto_repair)
+
         dest_opts_row.addStretch()
         target_layout.addLayout(dest_opts_row)
 
@@ -2496,6 +2759,12 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.start_download)
 
+        self.btn_verify_files = QPushButton("🔍  Verify Files")
+        self.btn_verify_files.setProperty("class", "btn-primary")
+        self.btn_verify_files.setEnabled(False)
+        self.btn_verify_files.setToolTip("Verify existing downloaded files against Dropbox cloud checksums without re-downloading intact files.")
+        self.btn_verify_files.clicked.connect(self.start_verification_only)
+
         self.pause_button = QPushButton("⏸  Pause Download")
         self.pause_button.setProperty("class", "btn-pause")
         self.pause_button.setVisible(False)
@@ -2506,7 +2775,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self.stop_download)
 
-        actions_row.addWidget(self.start_button, 1)
+        actions_row.addWidget(self.start_button, 2)
+        actions_row.addWidget(self.btn_verify_files, 1)
         actions_row.addWidget(self.pause_button, 1)
         actions_row.addWidget(self.stop_button, 1)
         progress_layout.addLayout(actions_row)
@@ -2616,6 +2886,12 @@ class MainWindow(QMainWindow):
             self.btn_browse.setEnabled(False)
             self.btn_open_folder.setEnabled(False)
             self.check_skip_existing.setEnabled(False)
+            if hasattr(self, "check_verify_integrity"):
+                self.check_verify_integrity.setEnabled(False)
+            if hasattr(self, "check_auto_repair"):
+                self.check_auto_repair.setEnabled(False)
+            if hasattr(self, "btn_verify_files"):
+                self.btn_verify_files.setEnabled(False)
             self.tree_widget.setEnabled(False)
             self.btn_select_all.setEnabled(False)
             self.btn_deselect_all.setEnabled(False)
@@ -2638,6 +2914,10 @@ class MainWindow(QMainWindow):
             self.btn_browse.setEnabled(not is_running)
             self.btn_open_folder.setEnabled(not is_running)
             self.check_skip_existing.setEnabled(not is_running)
+            if hasattr(self, "check_verify_integrity"):
+                self.check_verify_integrity.setEnabled(not is_running)
+            if hasattr(self, "check_auto_repair"):
+                self.check_auto_repair.setEnabled(not is_running)
             self.tree_widget.setEnabled(not is_running)
             self.btn_select_all.setEnabled(not active)
             self.btn_deselect_all.setEnabled(not active)
@@ -2675,6 +2955,8 @@ class MainWindow(QMainWindow):
 
         if is_running:
             self.start_button.setVisible(False)
+            if hasattr(self, "btn_verify_files"):
+                self.btn_verify_files.setVisible(False)
             self.pause_button.setVisible(True)
             self.stop_button.setVisible(True)
             self.pause_button.setEnabled(True)
@@ -2685,17 +2967,23 @@ class MainWindow(QMainWindow):
         self.pause_button.setVisible(False)
         self.stop_button.setVisible(False)
         self.start_button.setVisible(True)
+        if hasattr(self, "btn_verify_files"):
+            self.btn_verify_files.setVisible(True)
 
         if not logged_in:
             self.start_button.setEnabled(False)
             self.start_button.setText("🔒  Log In to Start")
             self.start_button.setToolTip("Please sign in to Dropbox to enable downloading.")
+            if hasattr(self, "btn_verify_files"):
+                self.btn_verify_files.setEnabled(False)
             return
 
         if is_scanning:
             self.start_button.setEnabled(False)
             self.start_button.setText("⏳  Loading Folders...")
             self.start_button.setToolTip("Scanning Dropbox shared link hierarchy...")
+            if hasattr(self, "btn_verify_files"):
+                self.btn_verify_files.setEnabled(False)
             return
 
         url = self.url_input.text().strip()
@@ -2704,6 +2992,14 @@ class MainWindow(QMainWindow):
         info = self.get_tree_selection_info()
         has_tree = info.get("has_tree_items", False)
         selected_count = info.get("selected_file_count", 0)
+
+        can_verify = bool(has_link and has_tree and selected_count > 0)
+        if hasattr(self, "btn_verify_files"):
+            self.btn_verify_files.setEnabled(can_verify)
+            if can_verify:
+                self.btn_verify_files.setText(f"🔍  Verify Files ({selected_count})")
+            else:
+                self.btn_verify_files.setText("🔍  Verify Files")
 
         if not has_link:
             self.start_button.setEnabled(False)
@@ -2919,6 +3215,17 @@ class MainWindow(QMainWindow):
         if saved_dest:
             self.destination_input.setText(saved_dest)
 
+        skip_raw = self.settings.value("skip_existing", True)
+        self.check_skip_existing.setChecked(str(skip_raw).lower() in ("true", "1"))
+
+        if hasattr(self, "check_verify_integrity"):
+            verify_raw = self.settings.value("verify_integrity", True)
+            self.check_verify_integrity.setChecked(str(verify_raw).lower() in ("true", "1"))
+
+        if hasattr(self, "check_auto_repair"):
+            repair_raw = self.settings.value("auto_repair", True)
+            self.check_auto_repair.setChecked(str(repair_raw).lower() in ("true", "1"))
+
         recent_raw = self.settings.value("recent_links_json", "")
         if recent_raw:
             try:
@@ -3049,6 +3356,13 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         self.settings.setValue("destination", self.destination_input.text().strip())
+        if hasattr(self, "check_skip_existing"):
+            self.settings.setValue("skip_existing", self.check_skip_existing.isChecked())
+        if hasattr(self, "check_verify_integrity"):
+            self.settings.setValue("verify_integrity", self.check_verify_integrity.isChecked())
+        if hasattr(self, "check_auto_repair"):
+            self.settings.setValue("auto_repair", self.check_auto_repair.isChecked())
+
         if self.current_refresh_token:
             self.settings.setValue("oauth_refresh_token", self.current_refresh_token)
         else:
@@ -3797,13 +4111,17 @@ class MainWindow(QMainWindow):
         self._is_running = running
         self.btn_oauth_login.setEnabled(not running)
         self.btn_logout.setEnabled(not running)
+        if hasattr(self, "btn_verify_files"):
+            self.btn_verify_files.setEnabled(not running)
         self.update_feature_enabled_state()
 
         if running:
-            self.set_status_badge("● Downloading...", "running")
+            curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
+            if "verifying" not in curr.lower():
+                self.set_status_badge("● Downloading...", "running")
         else:
             curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
-            if "completed" not in curr.lower():
+            if not any(k in curr.lower() for k in ("completed", "warning", "error")):
                 if self.is_logged_in():
                     self.set_status_badge("● Ready", "ready")
                 else:
@@ -3819,6 +4137,8 @@ class MainWindow(QMainWindow):
         url = self.url_input.text().strip()
         destination = self.destination_input.text().strip()
         skip_existing = self.check_skip_existing.isChecked()
+        verify_integrity = self.check_verify_integrity.isChecked() if hasattr(self, "check_verify_integrity") else True
+        auto_repair = self.check_auto_repair.isChecked() if hasattr(self, "check_auto_repair") else True
         link_password = (self.link_password or "").strip()
 
         if not url:
@@ -3895,6 +4215,98 @@ class MainWindow(QMainWindow):
             selected_folders=info["selected_folders"],
             deselected_folders=info["deselected_folders"],
             has_tree_filter=info["has_tree_items"],
+            verify_integrity=verify_integrity,
+            auto_repair=auto_repair,
+            verify_only=False,
+        )
+
+        self.worker.moveToThread(self.download_thread)
+        self.download_thread.started.connect(self.worker.run)
+
+        self.worker.log.connect(self.add_log)
+        self.worker.folder_changed.connect(self.folder_label.setText)
+        self.worker.file_changed.connect(self.file_label.setText)
+        self.worker.current_progress.connect(self.update_file_progress)
+        self.worker.overall_progress.connect(self.update_overall_progress)
+        self.worker.stats_changed.connect(self.update_stats)
+        self.worker.paused_signal.connect(self.on_download_paused_changed)
+
+        self.worker.finished.connect(self.download_finished)
+        self.worker.failed.connect(self.download_failed)
+
+        self.download_thread.start()
+
+    def start_verification_only(self):
+        if not self.is_logged_in():
+            self.prompt_login_required("verify downloaded files")
+            return
+
+        self.cleanup_download_thread()
+
+        url = self.url_input.text().strip()
+        destination = self.destination_input.text().strip()
+        link_password = (self.link_password or "").strip()
+
+        if not url:
+            ModernMessageBox.warning(self, "Missing Link", "Please enter or paste a Dropbox shared link before verifying.")
+            self.url_input.setFocus()
+            return
+
+        if not destination:
+            ModernMessageBox.warning(self, "Missing Destination", "Please choose a local save destination folder before verifying.")
+            return
+
+        info = self.get_tree_selection_info()
+        if info["has_tree_items"] and info["selected_file_count"] == 0:
+            ModernMessageBox.warning(
+                self,
+                "No Files Selected",
+                "Please select at least one file or folder from the tree above to verify."
+            )
+            return
+
+        self.file_progress.setValue(0)
+        self.overall_progress.setValue(0)
+        self.file_pct_label.setText("0%")
+        self.overall_pct_label.setText("0%")
+        self.folder_label.setText("Verifying Files...")
+        self.file_label.setText("Connecting to Dropbox API to check metadata...")
+        self.val_speed.setText("0 B/s")
+        self.val_data.setText("0 B")
+        self.val_files.setText("0 files")
+        self.val_time.setText("00:00")
+
+        self.is_download_paused = False
+        self.pause_button.setText("⏸  Pause")
+        self.pause_button.setProperty("class", "btn-pause")
+        st = self.pause_button.style()
+        if st is not None:
+            st.unpolish(self.pause_button)
+            st.polish(self.pause_button)
+
+        self.set_running(True)
+        self.set_status_badge("● Verifying...", "verifying")
+        self.add_log("🔍 Starting on-demand file integrity verification...")
+
+        auto_repair = self.check_auto_repair.isChecked() if hasattr(self, "check_auto_repair") else True
+
+        self.download_thread = QThread()
+        self.worker = DownloadWorker(
+            url=url,
+            destination=destination,
+            access_token=self.current_access_token,
+            refresh_token=self.current_refresh_token,
+            app_key=self.get_app_key(),
+            link_password=link_password,
+            skip_existing=True,
+            selected_files=info["selected_files"],
+            deselected_files=info["deselected_files"],
+            selected_folders=info["selected_folders"],
+            deselected_folders=info["deselected_folders"],
+            has_tree_filter=info["has_tree_items"],
+            verify_integrity=True,
+            auto_repair=auto_repair,
+            verify_only=True,
         )
 
         self.worker.moveToThread(self.download_thread)
@@ -3945,22 +4357,37 @@ class MainWindow(QMainWindow):
         self.cleanup_download_thread()
         self.set_running(False)
         self.add_log(f"\n{message}")
+
+        has_corrupted = getattr(self.worker, "corrupted", 0) > 0 if self.worker else False
+        has_missing = getattr(self.worker, "missing", 0) > 0 if self.worker else False
+        has_errors = getattr(self.worker, "errors", 0) > 0 if self.worker else False
+
         if "stopped" in message.lower() or "cancelled" in message.lower():
             self.set_status_badge("⏹ Stopped", "neutral")
             self.folder_label.setText("Stopped")
-            self.file_label.setText("Download operation stopped")
+            self.file_label.setText("Operation stopped by user")
             self.val_speed.setText("0 B/s")
-            ModernMessageBox.information(self, "Download Stopped", message)
-        else:
-            self.set_status_badge("● Completed", "success")
-            self.folder_label.setText("Completed")
-            self.file_label.setText("Download completed successfully")
+            ModernMessageBox.information(self, "Operation Stopped", message)
+        elif has_corrupted or has_missing or has_errors:
+            self.set_status_badge("⚠️ Warnings", "warning")
+            self.folder_label.setText("Completed with Warnings")
+            self.file_label.setText("Some files had verification or download issues")
             self.overall_pct_label.setText("100%")
             self.file_pct_label.setText("100%")
             self.file_progress.setValue(100)
             self.overall_progress.setValue(100)
             self.val_speed.setText("0 B/s")
-            ModernMessageBox.information(self, "Download Completed", message)
+            ModernMessageBox.warning(self, "Completed with Warnings", message)
+        else:
+            self.set_status_badge("● Completed", "success")
+            self.folder_label.setText("Completed")
+            self.file_label.setText("Operation completed successfully")
+            self.overall_pct_label.setText("100%")
+            self.file_pct_label.setText("100%")
+            self.file_progress.setValue(100)
+            self.overall_progress.setValue(100)
+            self.val_speed.setText("0 B/s")
+            ModernMessageBox.information(self, "Completed Successfully", message)
 
         self.update_feature_enabled_state()
         self.update_download_button_state()

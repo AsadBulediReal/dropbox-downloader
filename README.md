@@ -73,6 +73,9 @@ When you open the app:
 - **Smart Skip & Existing File Auto-Scan**: If an existing local file is detected, the system immediately scans the entire queue to identify and skip all other already downloaded files, instantly updating progress bars and transfer statistics before downloading the remaining files.
 - **Natural Sequential Order**: Files and subfolders are strictly sorted and downloaded in natural human order (e.g. `01`, `02`, `10` instead of alphabetical `01`, `10`, `02`) both in the interactive folder tree and in the active download queue.
 - **Live Metrics Dashboard**: Real-time download speed (MB/s), bytes transferred, files completed, and elapsed time.
+- **Cryptographic File Integrity Verification**: Automatically verifies every downloaded and existing file using Dropbox's official SHA-256 block hash algorithm (`content_hash`) and exact byte counts to detect incomplete, missing, or corrupted files with 100% certainty.
+- **Automatic Corruption Repair**: Automatically deletes corrupted or partially written local files and re-downloads fresh copies from Dropbox, re-verifying to ensure all files on disk are completely intact.
+- **On-Demand File Verification**: A dedicated "🔍 Verify Files" button allows users to verify their local files against Dropbox cloud checksums at any time without having to re-download intact files.
 - **Dual Progress Bars**: Individual file progress and overall batch progress with 100% completion confirmation.
 - **Activity Log**: Searchable and filterable log console with one-click copy and clear.
-- **Safe & Resilient**: Graceful cancellation, thread lifecycle management, temporary download files, and path sanitization.
+- **Safe & Resilient**: Graceful cancellation, thread lifecycle management, temporary download files (`.tmp`), and path sanitization.
