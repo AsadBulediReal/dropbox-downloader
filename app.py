@@ -705,21 +705,115 @@ def safe_local_path(root: Path, relative_path: str) -> Path:
     return destination
 
 
-def resolve_download_root(destination: Path | str, root_name: str, raw_root_name: str = "") -> tuple[Path, bool]:
+def strip_folder_prefix(rel_path: str, prefix: str) -> str:
+    """Strip a matched folder prefix from relative path for direct folder saving."""
+    norm_rel = rel_path.replace("\\", "/").strip("/")
+    norm_pre = prefix.replace("\\", "/").strip("/")
+    if not norm_pre:
+        return norm_rel
+    if norm_rel.lower() == norm_pre.lower():
+        return ""
+    if norm_rel.lower().startswith(norm_pre.lower() + "/"):
+        return norm_rel[len(norm_pre) + 1:]
+    return norm_rel
+
+
+def check_single_folder_destination_match(
+    files: list,
+    destination: Path | str,
+    single_folder_hint: str = "",
+) -> tuple[str | None, str | None]:
+    """
+    Check if exactly 1 folder was selected for download and if the destination folder's
+    name matches that selected folder (case-insensitive and Windows-sanitized).
+    
+    Returns:
+        (matched_folder_name, prefix_to_strip) or (None, None)
+    """
+    if not files:
+        return None, None
+
+    dest_path = Path(destination)
+    dest_name = dest_path.resolve().name if dest_path.is_absolute() else dest_path.name
+    dest_name = dest_name.strip()
+    if not dest_name:
+        return None, None
+
+    dest_lower = dest_name.lower()
+    dest_clean_lower = sanitize_filename(dest_name).lower()
+
+    # Step 1: Collect normalized parts of all files
+    all_parts = []
+    for entry in files:
+        rel = getattr(entry, "rel_path", "") if not isinstance(entry, dict) else entry.get("rel_path", "")
+        rel_clean = rel.replace("\\", "/").strip("/")
+        parts = [p for p in rel_clean.split("/") if p]
+        if len(parts) <= 1:
+            # File is at the root level, so files outside any subfolder are selected
+            return None, None
+        all_parts.append(parts)
+
+    # Step 2: Check if all files share the exact same top-level folder
+    top_folder = all_parts[0][0]
+    if not all(p[0].lower() == top_folder.lower() for p in all_parts):
+        return None, None
+
+    # Step 3: Find common folder prefix across all files
+    common_segments = [top_folder]
+    min_depth = min(len(p) for p in all_parts)
+    for idx in range(1, min_depth - 1):  # leave last item (filename)
+        seg = all_parts[0][idx]
+        if all(p[idx].lower() == seg.lower() for p in all_parts):
+            common_segments.append(seg)
+        else:
+            break
+
+    # Check if dest_name matches any segment in common_segments (deepest to shallowest)
+    for i in range(len(common_segments) - 1, -1, -1):
+        seg = common_segments[i]
+        seg_lower = seg.lower()
+        seg_clean_lower = sanitize_filename(seg).lower()
+        if (
+            dest_lower == seg_lower
+            or dest_lower == seg_clean_lower
+            or dest_clean_lower == seg_lower
+            or dest_clean_lower == seg_clean_lower
+        ):
+            matched_prefix = "/".join(common_segments[:i + 1])
+            return seg, matched_prefix
+
+    # Also check if single_folder_hint matches dest_name
+    if single_folder_hint:
+        hint_clean = single_folder_hint.replace("\\", "/").strip("/")
+        hint_name = Path(hint_clean).name.strip()
+        hint_lower = hint_name.lower()
+        hint_clean_lower = sanitize_filename(hint_name).lower()
+        if (
+            dest_lower == hint_lower
+            or dest_lower == hint_clean_lower
+            or dest_clean_lower == hint_lower
+            or dest_clean_lower == hint_clean_lower
+        ):
+            # Verify that all files start with hint_clean
+            if all(
+                getattr(e, "rel_path", "").replace("\\", "/").strip("/").lower().startswith(hint_clean.lower() + "/")
+                for e in files
+            ):
+                return hint_name, hint_clean
+
+    return None, None
+
+
+def resolve_download_root(destination: Path | str, root_name: str = "", raw_root_name: str = "") -> tuple[Path, bool]:
     """
     Determine the local root directory for saving files.
-    If the selected destination folder already has the same name as the Dropbox folder,
-    download directly into that folder (does not create a duplicate nested root folder).
-    Otherwise, creates/returns a subfolder named root_name inside destination.
+    Downloads directly into the destination folder (does not create an unwanted root folder).
 
     Returns:
         (resolved_root_path, is_same_folder)
     """
     dest_path = Path(destination)
     clean_root = sanitize_filename(root_name) if root_name else ""
-    if not clean_root:
-        clean_root = "DropboxFolder"
-
     dest_folder_name = dest_path.resolve().name if dest_path.is_absolute() else dest_path.name
     dest_folder_name = dest_folder_name.strip()
 
@@ -728,9 +822,10 @@ def resolve_download_root(destination: Path | str, root_name: str, raw_root_name
     dest_lower = dest_folder_name.lower()
     dest_sanitized_lower = sanitize_filename(dest_folder_name).strip().lower()
 
-    # Check if selected folder name matches Dropbox folder name (case-insensitive)
+    # Check if selected destination folder name matches Dropbox folder name (case-insensitive)
     is_same = bool(
         dest_lower
+        and clean_root_lower
         and (
             dest_lower == clean_root_lower
             or dest_lower == raw_root_lower
@@ -739,10 +834,7 @@ def resolve_download_root(destination: Path | str, root_name: str, raw_root_name
         )
     )
 
-    if is_same:
-        return dest_path, True
-
-    return safe_local_path(dest_path, clean_root), False
+    return dest_path, is_same
 
 
 def relative_path(entry: Any) -> str:
@@ -1270,6 +1362,7 @@ class DownloadWorker(QObject):
         deselected_files: set[str] | None = None,
         selected_folders: set[str] | None = None,
         deselected_folders: set[str] | None = None,
+        single_selected_folder: str = "",
         has_tree_filter: bool = False,
         verify_integrity: bool = True,
         auto_repair: bool = True,
@@ -1288,6 +1381,7 @@ class DownloadWorker(QObject):
         self.deselected_files = deselected_files or set()
         self.selected_folders = selected_folders or set()
         self.deselected_folders = deselected_folders or set()
+        self.single_selected_folder = (single_selected_folder or "").strip()
         self.has_tree_filter = has_tree_filter
         self.verify_integrity = verify_integrity
         self.auto_repair = auto_repair
@@ -1585,16 +1679,9 @@ class DownloadWorker(QObject):
 
             raw_root_name = getattr(metadata, "name", None) or "DropboxFolder"
             root_name = sanitize_filename(raw_root_name) or "DropboxFolder"
-            local_root, is_same_folder = resolve_download_root(self.destination, root_name, raw_root_name)
+            local_root = self.destination
             local_root.mkdir(parents=True, exist_ok=True)
-
-            if is_same_folder:
-                self.log.emit(
-                    f"📁 Target folder matches Dropbox folder '{root_name}'.\n"
-                    f"   Downloading contents directly into: {local_root} (no duplicate root folder created)"
-                )
-            else:
-                self.log.emit(f"📁 Destination folder: {local_root}")
+            self.log.emit(f"📁 Destination folder: {local_root}")
             self.log.emit("🔍 Querying Dropbox hierarchy...")
 
             shared_link = SharedLink(
@@ -1628,6 +1715,21 @@ class DownloadWorker(QObject):
             total_selected = len(self.files)
 
             self.log.emit(f"✓ Selected {total_selected} of {len(all_discovered)} file(s) to download.")
+
+            # Check if exactly 1 folder was selected and destination folder name matches
+            matched_folder, stripped_prefix = check_single_folder_destination_match(
+                filtered_files,
+                self.destination,
+                self.single_selected_folder,
+            )
+            if matched_folder and stripped_prefix:
+                dest_display_name = self.destination.resolve().name if self.destination.is_absolute() else self.destination.name
+                self.log.emit(
+                    f"📁 Destination folder '{dest_display_name}' matches selected folder '{matched_folder}'.\n"
+                    f"   Downloading contents directly into: {local_root} (no duplicate nested folder created)"
+                )
+                for entry in filtered_files:
+                    entry.rel_path = strip_folder_prefix(entry.rel_path, stripped_prefix)
 
             files_to_download: list[DownloadFileItem] = list(self.files)
 
@@ -3080,10 +3182,18 @@ class MainWindow(QMainWindow):
             if hasattr(self, "check_auto_repair"):
                 self.check_auto_repair.setEnabled(not is_running)
             self.tree_widget.setEnabled(not is_running)
-            self.btn_select_all.setEnabled(not active)
-            self.btn_deselect_all.setEnabled(not active)
-            self.btn_expand_all.setEnabled(not active)
-            self.btn_collapse_all.setEnabled(not active)
+            has_items = False
+            for i in range(self.tree_widget.topLevelItemCount()):
+                item = self.tree_widget.topLevelItem(i)
+                if item and item.data(0, Qt.ItemDataRole.UserRole) is not None:
+                    has_items = True
+                    break
+
+            can_act_tree = not is_running and not is_scanning and has_items
+            self.btn_select_all.setEnabled(can_act_tree)
+            self.btn_deselect_all.setEnabled(can_act_tree)
+            self.btn_expand_all.setEnabled(can_act_tree)
+            self.btn_collapse_all.setEnabled(can_act_tree)
             if not active:
                 curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
                 if not any(k in curr.lower() for k in ("completed", "error", "stopped")):
@@ -3836,16 +3946,8 @@ class MainWindow(QMainWindow):
             return
 
         target_path = Path(dest)
-        root_name = getattr(self, "current_root_name", "")
-        if root_name:
-            resolved_target, _ = resolve_download_root(target_path, root_name)
-            if resolved_target.exists():
-                target_path = resolved_target
-
         if target_path.exists():
             os.startfile(str(target_path))
-        elif Path(dest).exists():
-            os.startfile(dest)
         else:
             ModernMessageBox.information(self, "Notice", "Download destination folder does not exist yet.")
 
@@ -3876,6 +3978,7 @@ class MainWindow(QMainWindow):
         loading_item = QTreeWidgetItem(self.tree_widget, ["⏳ Loading folders from Dropbox...", "", ""])
         loading_item.setFlags(loading_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
 
+        self.update_feature_enabled_state()
         self.update_download_button_state()
 
         t = QThread()
@@ -3934,6 +4037,7 @@ class MainWindow(QMainWindow):
         self.update_selection_summary()
         url = self.url_input.text().strip()
         self.add_recent_link(url, title=root_name, item_count=len(entries))
+        self.update_feature_enabled_state()
         self.update_download_button_state()
 
     def on_scan_failed(self, error: str):
@@ -3946,6 +4050,7 @@ class MainWindow(QMainWindow):
         self.show_empty_tree_placeholder()
         self.set_selection_summary(f"⚠️ {title}", "error")
         self.add_log(f"⚠️ {title}: {friendly_msg.splitlines()[0]}")
+        self.update_feature_enabled_state()
         self.update_download_button_state()
 
         if "password" in error.lower() or "access_denied" in error.lower():
@@ -4027,6 +4132,7 @@ class MainWindow(QMainWindow):
         self.tree_widget.collapseAll()
         self._updating_tree = False
         self.update_selection_summary()
+        self.update_feature_enabled_state()
 
     def _get_tree_items_between(self, item1: QTreeWidgetItem, item2: QTreeWidgetItem) -> list[QTreeWidgetItem]:
         """Return all visible tree items between item1 and item2 (inclusive) in top-to-bottom order."""
@@ -4203,6 +4309,7 @@ class MainWindow(QMainWindow):
             elif action == act_deselect_all:
                 self.deselect_all_items()
         else:
+            act_only_folder = menu.addAction(f"🎯 Select Only '{raw_name}'")
             act_select_folder = menu.addAction(f"☑ Select All in '{raw_name}'")
             act_deselect_folder = menu.addAction(f"☐ Deselect All in '{raw_name}'")
             menu.addSeparator()
@@ -4220,6 +4327,9 @@ class MainWindow(QMainWindow):
             elif is_multi and action == act_only_sel:
                 self.deselect_all_items()
                 self.set_items_checked(selected_items, Qt.CheckState.Checked)
+            elif action == act_only_folder:
+                self.deselect_all_items()
+                item.setCheckState(0, Qt.CheckState.Checked)
             elif action == act_select_folder:
                 item.setCheckState(0, Qt.CheckState.Checked)
             elif action == act_deselect_folder:
@@ -4439,11 +4549,70 @@ class MainWindow(QMainWindow):
         for i in range(self.tree_widget.topLevelItemCount()):
             traverse(self.tree_widget.topLevelItem(i))
 
+        # Check if exactly 1 folder hierarchy is selected in tree
+        checked_top_folders = []
+        checked_top_files = []
+        partially_checked_folders = []
+        for i in range(self.tree_widget.topLevelItemCount()):
+            top_item = self.tree_widget.topLevelItem(i)
+            if top_item is None or top_item.data(0, Qt.ItemDataRole.UserRole) is None:
+                continue
+            is_dir = bool(top_item.data(1, Qt.ItemDataRole.UserRole))
+            state = top_item.checkState(0)
+            if state == Qt.CheckState.Checked:
+                if is_dir:
+                    checked_top_folders.append(top_item)
+                else:
+                    checked_top_files.append(top_item)
+            elif state == Qt.CheckState.PartiallyChecked and is_dir:
+                partially_checked_folders.append(top_item)
+
+        single_selected_folder = ""
+        if len(checked_top_files) == 0:
+            if len(checked_top_folders) == 1 and len(partially_checked_folders) == 0:
+                f_item = checked_top_folders[0]
+                single_selected_folder = (
+                    f_item.data(0, Qt.ItemDataRole.UserRole)
+                    or f_item.data(3, Qt.ItemDataRole.UserRole)
+                    or ""
+                )
+            elif len(checked_top_folders) == 0 and len(partially_checked_folders) == 1:
+                curr = partially_checked_folders[0]
+                while curr is not None:
+                    c_checked_f = []
+                    c_checked_files = []
+                    c_partial = []
+                    for c_idx in range(curr.childCount()):
+                        ch = curr.child(c_idx)
+                        if ch is None:
+                            continue
+                        ch_dir = bool(ch.data(1, Qt.ItemDataRole.UserRole))
+                        ch_st = ch.checkState(0)
+                        if ch_st == Qt.CheckState.Checked:
+                            if ch_dir:
+                                c_checked_f.append(ch)
+                            else:
+                                c_checked_files.append(ch)
+                        elif ch_st == Qt.CheckState.PartiallyChecked and ch_dir:
+                            c_partial.append(ch)
+                    if len(c_checked_files) == 0 and len(c_checked_f) == 1 and len(c_partial) == 0:
+                        single_selected_folder = (
+                            c_checked_f[0].data(0, Qt.ItemDataRole.UserRole)
+                            or c_checked_f[0].data(3, Qt.ItemDataRole.UserRole)
+                            or ""
+                        )
+                        break
+                    elif len(c_checked_files) == 0 and len(c_checked_f) == 0 and len(c_partial) == 1:
+                        curr = c_partial[0]
+                    else:
+                        break
+
         return {
             "selected_files": selected_files,
             "deselected_files": deselected_files,
             "selected_folders": selected_folders,
             "deselected_folders": deselected_folders,
+            "single_selected_folder": single_selected_folder,
             "total_files": total_files,
             "selected_file_count": total_selected_files,
             "has_tree_items": has_tree_items,
@@ -4588,6 +4757,7 @@ class MainWindow(QMainWindow):
             deselected_files=info["deselected_files"],
             selected_folders=info["selected_folders"],
             deselected_folders=info["deselected_folders"],
+            single_selected_folder=info.get("single_selected_folder", ""),
             has_tree_filter=info["has_tree_items"],
             verify_integrity=verify_integrity,
             auto_repair=auto_repair,
@@ -4693,6 +4863,7 @@ class MainWindow(QMainWindow):
             deselected_files=info["deselected_files"],
             selected_folders=info["selected_folders"],
             deselected_folders=info["deselected_folders"],
+            single_selected_folder=info.get("single_selected_folder", ""),
             has_tree_filter=info["has_tree_items"],
             verify_integrity=True,
             auto_repair=auto_repair,
