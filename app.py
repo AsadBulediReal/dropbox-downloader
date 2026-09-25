@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 from typing import Any
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from dotenv import load_dotenv
@@ -1236,6 +1237,23 @@ class ScanWorker(QObject):
                     meta_kwargs["link_password"] = self.password
                 meta = dbx.sharing_get_shared_link_metadata(**meta_kwargs)
                 root_name = getattr(meta, "name", None) or "DropboxFolder"
+
+                # Fast path: Single file shared link
+                if isinstance(meta, FileMetadata):
+                    file_name = getattr(meta, "name", "file")
+                    file_size = getattr(meta, "size", 0)
+                    file_hash = getattr(meta, "content_hash", None)
+                    entries = [{
+                        "name": file_name,
+                        "path": file_name,
+                        "is_dir": False,
+                        "size": file_size,
+                        "content_hash": file_hash,
+                    }]
+                    root_name = sanitize_filename(root_name) or "DropboxFolder"
+                    tree = build_tree_hierarchy(entries, root_name)
+                    self.finished.emit(tree, root_name, entries)
+                    return
             except ApiError as exc:
                 if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
                     raise ValueError(
@@ -1251,53 +1269,65 @@ class ScanWorker(QObject):
 
             self.status.emit("Querying folder hierarchy...")
 
-            def collect_recursive(api_path="", rel_dir=""):
+            def fetch_folder_entries(api_path: str, rel_dir: str) -> tuple[list[dict], list[tuple[str, str]]]:
                 if self._is_cancelled:
-                    return
-                res: Any = dbx.files_list_folder(path=api_path, shared_link=shared_link, recursive=False)
-                subfolders_to_visit = []
-                if res and hasattr(res, "entries"):
-                    for e in res.entries:
+                    return [], []
+                local_entries = []
+                local_subfolders = []
+                try:
+                    res: Any = dbx.files_list_folder(path=api_path, shared_link=shared_link, recursive=False)
+                    while res:
                         if self._is_cancelled:
-                            return
-                        is_dir = isinstance(e, FolderMetadata)
-                        name = e.name
-                        if not name:
-                            continue
-                        rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
-                        size = getattr(e, "size", 0) if not is_dir else 0
-                        item_hash = getattr(e, "content_hash", None) if not is_dir else None
-                        entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size, "content_hash": item_hash})
-                        if is_dir:
-                            next_api = f"{api_path}/{name}" if api_path else f"/{name}"
-                            subfolders_to_visit.append((next_api, rel))
+                            break
+                        if hasattr(res, "entries"):
+                            for e in res.entries:
+                                if self._is_cancelled:
+                                    break
+                                is_dir = isinstance(e, FolderMetadata)
+                                name = e.name
+                                if not name:
+                                    continue
+                                rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
+                                size = getattr(e, "size", 0) if not is_dir else 0
+                                item_hash = getattr(e, "content_hash", None) if not is_dir else None
+                                local_entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size, "content_hash": item_hash})
+                                if is_dir:
+                                    next_api = f"{api_path}/{name}" if api_path else f"/{name}"
+                                    local_subfolders.append((next_api, rel))
+                        if getattr(res, "has_more", False) and not self._is_cancelled:
+                            res = dbx.files_list_folder_continue(res.cursor)
+                        else:
+                            break
+                except Exception:
+                    pass
+                return local_entries, local_subfolders
 
-                while res and getattr(res, "has_more", False):
-                    if self._is_cancelled:
-                        return
-                    res = dbx.files_list_folder_continue(res.cursor)
-                    if res and hasattr(res, "entries"):
-                        for e in res.entries:
+            # 1. Fetch root items
+            root_items, pending_subfolders = fetch_folder_entries("", "")
+            entries.extend(root_items)
+
+            # 2. Concurrently fetch all subfolders using ThreadPoolExecutor
+            if pending_subfolders and not self._is_cancelled:
+                max_workers = min(16, max(4, len(pending_subfolders)))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    while pending_subfolders and not self._is_cancelled:
+                        current_batch = pending_subfolders
+                        pending_subfolders = []
+
+                        futures = [
+                            executor.submit(fetch_folder_entries, api_path, rel_dir)
+                            for api_path, rel_dir in current_batch
+                        ]
+
+                        for future in as_completed(futures):
                             if self._is_cancelled:
-                                return
-                            is_dir = isinstance(e, FolderMetadata)
-                            name = e.name
-                            if not name:
-                                continue
-                            rel = f"{rel_dir}/{name}".strip("/") if rel_dir else name
-                            size = getattr(e, "size", 0) if not is_dir else 0
-                            item_hash = getattr(e, "content_hash", None) if not is_dir else None
-                            entries.append({"name": name, "path": rel, "is_dir": is_dir, "size": size, "content_hash": item_hash})
-                            if is_dir:
-                                next_api = f"{api_path}/{name}" if api_path else f"/{name}"
-                                subfolders_to_visit.append((next_api, rel))
-
-                for next_api, next_rel in subfolders_to_visit:
-                    if self._is_cancelled:
-                        return
-                    collect_recursive(next_api, next_rel)
-
-            collect_recursive("", "")
+                                break
+                            try:
+                                sub_items, sub_folders = future.result()
+                                entries.extend(sub_items)
+                                pending_subfolders.extend(sub_folders)
+                            except Exception:
+                                pass
 
             if self._is_cancelled:
                 return
@@ -4075,64 +4105,68 @@ class MainWindow(QMainWindow):
 
     def populate_tree_widget(self, tree_dict: dict, root_name: str):
         self._updating_tree = True
-        self.tree_widget.clear()
+        self.tree_widget.setUpdatesEnabled(False)
+        try:
+            self.tree_widget.clear()
 
-        def add_item_recursive(parent_item: QTreeWidgetItem | None, node_data: dict[str, Any]):
-            name = node_data["name"]
-            is_dir = node_data["is_dir"]
-            size: int = int(node_data.get("size") or 0)
-            total_size: int = int(node_data.get("total_size") or size)
-            children_count = len(node_data.get("children", {}))
+            def add_item_recursive(parent_item: QTreeWidgetItem | None, node_data: dict[str, Any]):
+                name = node_data["name"]
+                is_dir = node_data["is_dir"]
+                size: int = int(node_data.get("size") or 0)
+                total_size: int = int(node_data.get("total_size") or size)
+                children_count = len(node_data.get("children", {}))
 
-            if is_dir:
-                icon_str = "📁 "
-                type_str = f"Folder ({children_count} items)" if children_count > 0 else "Folder"
-                size_str = format_bytes(total_size) if total_size > 0 else ""
+                if is_dir:
+                    icon_str = "📁 "
+                    type_str = f"Folder ({children_count} items)" if children_count > 0 else "Folder"
+                    size_str = format_bytes(total_size) if total_size > 0 else ""
+                else:
+                    type_str, icon_str = get_file_type_and_icon(name)
+                    size_str = format_bytes(size) if size > 0 else "0 B"
+
+                item = QTreeWidgetItem([f"{icon_str}{name}", type_str, size_str])
+                item.setCheckState(0, Qt.CheckState.Checked)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                item.setData(0, Qt.ItemDataRole.UserRole, node_data["path"])
+                item.setData(1, Qt.ItemDataRole.UserRole, is_dir)
+                item.setData(2, Qt.ItemDataRole.UserRole, size if not is_dir else total_size)
+                item.setData(3, Qt.ItemDataRole.UserRole, name)
+                item.setToolTip(0, f"{'Folder' if is_dir else 'File'}: {node_data['path'] or name}")
+
+                if parent_item is None:
+                    self.tree_widget.addTopLevelItem(item)
+                else:
+                    parent_item.addChild(item)
+
+                for child_name, child_data in sorted(
+                    node_data["children"].items(),
+                    key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
+                ):
+                    add_item_recursive(item, child_data)
+
+            if tree_dict["children"]:
+                for child_name, child_data in sorted(
+                    tree_dict["children"].items(),
+                    key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
+                ):
+                    add_item_recursive(None, child_data)
             else:
-                type_str, icon_str = get_file_type_and_icon(name)
-                size_str = format_bytes(size) if size > 0 else "0 B"
+                single_item = QTreeWidgetItem([f"📁 {root_name}", "Folder", ""])
+                single_item.setCheckState(0, Qt.CheckState.Checked)
+                single_item.setFlags(single_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                single_item.setData(0, Qt.ItemDataRole.UserRole, root_name)
+                single_item.setData(1, Qt.ItemDataRole.UserRole, True)
+                single_item.setData(2, Qt.ItemDataRole.UserRole, 0)
+                single_item.setData(3, Qt.ItemDataRole.UserRole, root_name)
+                single_item.setToolTip(0, f"Folder: {root_name}")
+                self.tree_widget.addTopLevelItem(single_item)
 
-            item = QTreeWidgetItem([f"{icon_str}{name}", type_str, size_str])
-            item.setCheckState(0, Qt.CheckState.Checked)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            item.setData(0, Qt.ItemDataRole.UserRole, node_data["path"])
-            item.setData(1, Qt.ItemDataRole.UserRole, is_dir)
-            item.setData(2, Qt.ItemDataRole.UserRole, size if not is_dir else total_size)
-            item.setData(3, Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(0, f"{'Folder' if is_dir else 'File'}: {node_data['path'] or name}")
-
-            if parent_item is None:
-                self.tree_widget.addTopLevelItem(item)
-            else:
-                parent_item.addChild(item)
-
-            for child_name, child_data in sorted(
-                node_data["children"].items(),
-                key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
-            ):
-                add_item_recursive(item, child_data)
-
-        if tree_dict["children"]:
-            for child_name, child_data in sorted(
-                tree_dict["children"].items(),
-                key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
-            ):
-                add_item_recursive(None, child_data)
-        else:
-            single_item = QTreeWidgetItem([f"📁 {root_name}", "Folder", ""])
-            single_item.setCheckState(0, Qt.CheckState.Checked)
-            single_item.setFlags(single_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            single_item.setData(0, Qt.ItemDataRole.UserRole, root_name)
-            single_item.setData(1, Qt.ItemDataRole.UserRole, True)
-            single_item.setData(2, Qt.ItemDataRole.UserRole, 0)
-            single_item.setData(3, Qt.ItemDataRole.UserRole, root_name)
-            single_item.setToolTip(0, f"Folder: {root_name}")
-            self.tree_widget.addTopLevelItem(single_item)
-
-        self.tree_widget.collapseAll()
-        self._updating_tree = False
-        self.update_selection_summary()
-        self.update_feature_enabled_state()
+            self.tree_widget.collapseAll()
+        finally:
+            self.tree_widget.setUpdatesEnabled(True)
+            self._updating_tree = False
+            self.update_selection_summary()
+            self.update_feature_enabled_state()
 
     def _get_tree_items_between(self, item1: QTreeWidgetItem, item2: QTreeWidgetItem) -> list[QTreeWidgetItem]:
         """Return all visible tree items between item1 and item2 (inclusive) in top-to-bottom order."""
