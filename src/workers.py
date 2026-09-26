@@ -360,6 +360,7 @@ class DownloadWorker(QObject):
         verify_integrity: bool = True,
         auto_repair: bool = True,
         verify_only: bool = False,
+        scanned_entries: list[dict] | None = None,
     ):
         super().__init__()
         self.url = url.strip()
@@ -379,6 +380,7 @@ class DownloadWorker(QObject):
         self.verify_integrity = verify_integrity
         self.auto_repair = auto_repair
         self.verify_only = verify_only
+        self.scanned_entries = scanned_entries
         self.verified_ok = 0
         self.corrupted = 0
         self.repaired = 0
@@ -507,6 +509,88 @@ class DownloadWorker(QObject):
                 sub_rel = f"{rel_dir}/{entry.name}".strip("/") if rel_dir else entry.name
                 sub_api = f"{api_path}/{entry.name}" if api_path else f"/{entry.name}"
                 self.collect(dbx, shared_link, api_path=sub_api, rel_dir=sub_rel)
+
+    def collect_parallel(self, dbx: dropbox.Dropbox, shared_link: SharedLink):
+        self._check_pause()
+        if self.stop_requested:
+            return
+
+        def fetch_folder_entries(api_path: str, rel_dir: str) -> tuple[list[DownloadFileItem], list[tuple[str, str]], int]:
+            if self.stop_requested:
+                return [], [], 0
+            local_files: list[DownloadFileItem] = []
+            local_subfolders: list[tuple[str, str]] = []
+            folder_count = 0
+            try:
+                res: Any = dbx.files_list_folder(
+                    path=api_path,
+                    shared_link=shared_link,
+                    recursive=False,
+                    include_non_downloadable_files=True,
+                )
+                while res:
+                    if self.stop_requested:
+                        break
+                    if hasattr(res, "entries"):
+                        for e in res.entries:
+                            if self.stop_requested:
+                                break
+                            if isinstance(e, FileMetadata):
+                                entry_rel = f"{rel_dir}/{e.name}".strip("/") if rel_dir else e.name
+                                entry_api = f"{api_path}/{e.name}" if api_path else f"/{e.name}"
+                                entry_hash = getattr(e, "content_hash", None)
+                                local_files.append(
+                                    DownloadFileItem(
+                                        name=e.name,
+                                        size=getattr(e, "size", 0) or 0,
+                                        rel_path=entry_rel,
+                                        api_path=entry_api,
+                                        metadata=e,
+                                        content_hash=entry_hash,
+                                    )
+                                )
+                            elif isinstance(e, FolderMetadata):
+                                folder_count += 1
+                                sub_rel = f"{rel_dir}/{e.name}".strip("/") if rel_dir else e.name
+                                sub_api = f"{api_path}/{e.name}" if api_path else f"/{e.name}"
+                                local_subfolders.append((sub_api, sub_rel))
+                    if getattr(res, "has_more", False) and not self.stop_requested:
+                        res = dbx.files_list_folder_continue(res.cursor)
+                    else:
+                        break
+            except Exception as exc:
+                if "shared_link_access_denied" in str(exc) or "password" in str(exc).lower():
+                    self.log.emit(f"🔒 Access denied listing {api_path or '/'}: Password may be required.")
+                else:
+                    self.log.emit(f"ERROR listing {api_path or '/'}: {exc}")
+            return local_files, local_subfolders, folder_count
+
+        root_files, pending_subfolders, root_folders_count = fetch_folder_entries("", "")
+        self.files.extend(root_files)
+        self.folders += root_folders_count
+
+        if pending_subfolders and not self.stop_requested:
+            max_workers = min(16, max(4, len(pending_subfolders)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                while pending_subfolders and not self.stop_requested:
+                    current_batch = pending_subfolders
+                    pending_subfolders = []
+
+                    futures = [
+                        executor.submit(fetch_folder_entries, api_path, rel_dir)
+                        for api_path, rel_dir in current_batch
+                    ]
+
+                    for future in as_completed(futures):
+                        if self.stop_requested:
+                            break
+                        try:
+                            sub_files, sub_folders, f_count = future.result()
+                            self.files.extend(sub_files)
+                            self.folders += f_count
+                            pending_subfolders.extend(sub_folders)
+                        except Exception:
+                            pass
 
     def download_one(self, dbx: dropbox.Dropbox, entry: Any, local_root: Path, total_files: int | None = None):
         if isinstance(entry, DownloadFileItem):
@@ -675,14 +759,29 @@ class DownloadWorker(QObject):
             local_root = self.destination
             local_root.mkdir(parents=True, exist_ok=True)
             self.log.emit(f"📁 Destination folder: {local_root}")
-            self.log.emit("🔍 Querying Dropbox hierarchy...")
 
-            shared_link = SharedLink(
-                url=self.url,
-                password=self.link_password if self.link_password else None,
-            )
-
-            self.collect(dbx, shared_link, api_path="", rel_dir="")
+            if self.scanned_entries:
+                self.log.emit("⚡ Using pre-scanned folder hierarchy (instant start)...")
+                for e in self.scanned_entries:
+                    if not e.get("is_dir"):
+                        rel = e.get("path") or e.get("rel_path") or ""
+                        api_path = f"/{rel}" if not rel.startswith("/") else rel
+                        self.files.append(
+                            DownloadFileItem(
+                                name=e.get("name") or Path(rel).name,
+                                size=int(e.get("size", 0) or 0),
+                                rel_path=rel,
+                                api_path=api_path,
+                                content_hash=e.get("content_hash"),
+                            )
+                        )
+            else:
+                self.log.emit("🔍 Querying Dropbox hierarchy...")
+                shared_link = SharedLink(
+                    url=self.url,
+                    password=self.link_password if self.link_password else None,
+                )
+                self.collect_parallel(dbx, shared_link)
 
             if self.stop_requested:
                 self.finished.emit("Download stopped.")

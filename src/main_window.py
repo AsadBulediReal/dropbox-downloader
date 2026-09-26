@@ -1561,6 +1561,8 @@ class MainWindow(QMainWindow):
 
         self.current_root_name = root_name
         self._tree_items_data = entries
+        url = self.url_input.text().strip()
+        self._scanned_url = url
         self.populate_tree_widget(tree_dict, root_name)
 
         folders_count = sum(1 for e in entries if e.get("is_dir"))
@@ -2281,6 +2283,13 @@ class MainWindow(QMainWindow):
         if info["has_tree_items"] and info["total_files"] > 0:
             self.add_log(f"📋 Selection: {info['selected_file_count']} of {info['total_files']} files selected for download.")
 
+        scanned_entries = None
+        if (
+            getattr(self, "_tree_items_data", None)
+            and getattr(self, "_scanned_url", None) == url
+        ):
+            scanned_entries = self._tree_items_data
+
         self.cleanup_download_thread()
         t = QThread()
         w = DownloadWorker(
@@ -2300,6 +2309,7 @@ class MainWindow(QMainWindow):
             verify_integrity=verify_integrity,
             auto_repair=auto_repair,
             verify_only=False,
+            scanned_entries=scanned_entries,
         )
 
         w.moveToThread(t)
@@ -2387,6 +2397,13 @@ class MainWindow(QMainWindow):
 
         auto_repair = self.check_auto_repair.isChecked() if hasattr(self, "check_auto_repair") else True
 
+        scanned_entries = None
+        if (
+            getattr(self, "_tree_items_data", None)
+            and getattr(self, "_scanned_url", None) == url
+        ):
+            scanned_entries = self._tree_items_data
+
         self.cleanup_download_thread()
         t = QThread()
         w = DownloadWorker(
@@ -2406,6 +2423,7 @@ class MainWindow(QMainWindow):
             verify_integrity=True,
             auto_repair=auto_repair,
             verify_only=True,
+            scanned_entries=scanned_entries,
         )
 
         w.moveToThread(t)
