@@ -440,7 +440,10 @@ def compute_dropbox_content_hash(
                 hasher.update(chunk)
                 read_bytes += len(chunk)
                 if progress_cb and file_size > 0:
-                    progress_cb(int(read_bytes * 100 / file_size))
+                    try:
+                        progress_cb(int(read_bytes * 100 / file_size), len(chunk))
+                    except TypeError:
+                        progress_cb(int(read_bytes * 100 / file_size))
         return hasher.hexdigest()
     else:
         block_hashes = b""
@@ -456,8 +459,12 @@ def compute_dropbox_content_hash(
                 block_hashes += hashlib.sha256(chunk).digest()
                 read_bytes += len(chunk)
                 if progress_cb and file_size > 0:
-                    progress_cb(int(read_bytes * 100 / file_size))
+                    try:
+                        progress_cb(int(read_bytes * 100 / file_size), len(chunk))
+                    except TypeError:
+                        progress_cb(int(read_bytes * 100 / file_size))
         return hashlib.sha256(block_hashes).hexdigest()
+
 
 
 def build_tree_hierarchy(entries: list, root_name: str = "DropboxFolder") -> dict[str, Any]:
@@ -582,8 +589,9 @@ def create_dropbox_client(
     access_token: str | None = None,
     refresh_token: str | None = None,
     app_key: str | None = None,
+    timeout: float = 30.0,
 ) -> dropbox.Dropbox:
-    """Create an authenticated Dropbox client, supporting OAuth PKCE refresh tokens."""
+    """Create an authenticated Dropbox client, supporting OAuth PKCE refresh tokens and explicit network timeouts."""
     r_token = (refresh_token or "").strip()
     a_token = (access_token or "").strip()
     k = (app_key or "").strip()
@@ -593,8 +601,10 @@ def create_dropbox_client(
             oauth2_access_token=a_token or None,
             oauth2_refresh_token=r_token,
             app_key=k,
+            timeout=timeout,
         )
     if a_token:
-        return dropbox.Dropbox(oauth2_access_token=a_token)
+        return dropbox.Dropbox(oauth2_access_token=a_token, timeout=timeout)
     raise ValueError("Not authenticated. Please sign in with your Dropbox account first.")
+
 

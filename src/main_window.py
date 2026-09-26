@@ -116,7 +116,12 @@ class MainWindow(QMainWindow):
         self.auto_scan_timer.setSingleShot(True)
         self.auto_scan_timer.timeout.connect(self.auto_scan_if_valid)
 
+        self.realtime_stats_timer = QTimer(self)
+        self.realtime_stats_timer.setInterval(250)
+        self.realtime_stats_timer.timeout.connect(self.tick_realtime_stats)
+
         self.setup_ui()
+
         self.load_settings()
 
     def set_status_badge(self, text: str, state: str = "ready"):
@@ -1624,7 +1629,16 @@ class MainWindow(QMainWindow):
 
                 if is_dir:
                     icon_str = "📁 "
-                    type_str = f"Folder ({children_count} items)" if children_count > 0 else "Folder"
+                    file_cnt = int(node_data.get("file_count") or 0)
+                    folder_cnt = len([c for c in node_data.get("children", {}).values() if c.get("is_dir")])
+                    if file_cnt > 0 and folder_cnt > 0:
+                        type_str = f"Folder ({file_cnt} {'file' if file_cnt == 1 else 'files'}, {folder_cnt} {'subfolder' if folder_cnt == 1 else 'subfolders'})"
+                    elif file_cnt > 0:
+                        type_str = f"Folder ({file_cnt} {'file' if file_cnt == 1 else 'files'})"
+                    elif folder_cnt > 0:
+                        type_str = f"Folder ({folder_cnt} {'subfolder' if folder_cnt == 1 else 'subfolders'})"
+                    else:
+                        type_str = "Folder (empty)"
                     size_str = format_bytes(total_size) if total_size > 0 else ""
                 else:
                     type_str, icon_str = get_file_type_and_icon(name)
@@ -2200,16 +2214,22 @@ class MainWindow(QMainWindow):
         self.update_feature_enabled_state()
 
         if running:
+            if hasattr(self, "realtime_stats_timer"):
+                self.realtime_stats_timer.start()
             curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
             if "verifying" not in curr.lower():
                 self.set_status_badge("● Downloading...", "running")
         else:
+            if hasattr(self, "realtime_stats_timer"):
+                self.realtime_stats_timer.stop()
+            self.tick_realtime_stats()
             curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
             if not any(k in curr.lower() for k in ("completed", "warning", "error")):
                 if self.is_logged_in():
                     self.set_status_badge("● Ready", "ready")
                 else:
                     self.set_status_badge("○ Login Required", "neutral")
+
 
     def start_download(self):
         if not self.is_logged_in():
@@ -2476,6 +2496,14 @@ class MainWindow(QMainWindow):
             self.val_files.setText(stats["files"])
         if "elapsed" in stats:
             self.val_time.setText(stats["elapsed"])
+
+    def tick_realtime_stats(self):
+        if self.worker and is_thread_running(self.download_thread):
+            try:
+                self.worker.emit_stats(force=True)
+            except Exception:
+                pass
+
 
     def stop_download(self):
         if self.worker:

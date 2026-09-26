@@ -232,13 +232,67 @@ class ScanWorker(QObject):
 
             self.status.emit("Querying folder hierarchy...")
 
-            def fetch_folder_entries(api_path: str, rel_dir: str) -> tuple[list[dict], list[tuple[str, str]]]:
-                if self._is_cancelled:
-                    return [], []
-                local_entries = []
-                local_subfolders = []
-                try:
-                    res: Any = dbx.files_list_folder(path=api_path, shared_link=shared_link, recursive=False)
+            rec_success = False
+            try:
+                res: Any = dbx.files_list_folder(
+                    path="",
+                    shared_link=shared_link,
+                    recursive=True,
+                    include_non_downloadable_files=True,
+                )
+                while res:
+                    if self._is_cancelled:
+                        break
+                    if hasattr(res, "entries"):
+                        for e in res.entries:
+                            if self._is_cancelled:
+                                break
+                            is_dir = isinstance(e, FolderMetadata)
+                            name = getattr(e, "name", "")
+                            if not name:
+                                continue
+                            path_display = getattr(e, "path_display", None) or getattr(e, "path_lower", None)
+                            if path_display:
+                                rel = path_display.lstrip("/")
+                            else:
+                                rel = name
+                            size = getattr(e, "size", 0) if not is_dir else 0
+                            item_hash = getattr(e, "content_hash", None) if not is_dir else None
+                            entries.append({
+                                "name": name,
+                                "path": rel,
+                                "is_dir": is_dir,
+                                "size": size,
+                                "content_hash": item_hash,
+                            })
+                    if getattr(res, "has_more", False) and not self._is_cancelled:
+                        res = dbx.files_list_folder_continue(res.cursor)
+                    else:
+                        break
+                rec_success = True
+            except Exception:
+                entries = []
+                rec_success = False
+
+            if not rec_success and not self._is_cancelled:
+                def fetch_folder_entries(api_path: str, rel_dir: str) -> tuple[list[dict], list[tuple[str, str]]]:
+                    if self._is_cancelled:
+                        return [], []
+                    local_entries = []
+                    local_subfolders = []
+                    max_retries = 3
+                    res: Any = None
+                    for attempt in range(max_retries):
+                        if self._is_cancelled:
+                            break
+                        try:
+                            res = dbx.files_list_folder(path=api_path, shared_link=shared_link, recursive=False)
+                            break
+                        except Exception:
+                            if attempt < max_retries - 1 and not self._is_cancelled:
+                                time.sleep(1.0 * (attempt + 1))
+                            else:
+                                break
                     while res:
                         if self._is_cancelled:
                             break
@@ -258,39 +312,44 @@ class ScanWorker(QObject):
                                     next_api = f"{api_path}/{name}" if api_path else f"/{name}"
                                     local_subfolders.append((next_api, rel))
                         if getattr(res, "has_more", False) and not self._is_cancelled:
-                            res = dbx.files_list_folder_continue(res.cursor)
+                            for attempt in range(max_retries):
+                                try:
+                                    res = dbx.files_list_folder_continue(res.cursor)
+                                    break
+                                except Exception:
+                                    if attempt < max_retries - 1 and not self._is_cancelled:
+                                        time.sleep(1.0 * (attempt + 1))
+                                    else:
+                                        res = None
+                                        break
                         else:
                             break
-                except Exception:
-                    pass
-                return local_entries, local_subfolders
+                    return local_entries, local_subfolders
 
-            # 1. Fetch root items
-            root_items, pending_subfolders = fetch_folder_entries("", "")
-            entries.extend(root_items)
+                root_items, pending_subfolders = fetch_folder_entries("", "")
+                entries.extend(root_items)
 
-            # 2. Concurrently fetch all subfolders using ThreadPoolExecutor
-            if pending_subfolders and not self._is_cancelled:
-                max_workers = min(16, max(4, len(pending_subfolders)))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    while pending_subfolders and not self._is_cancelled:
-                        current_batch = pending_subfolders
-                        pending_subfolders = []
+                if pending_subfolders and not self._is_cancelled:
+                    max_workers = min(4, max(2, len(pending_subfolders)))
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        while pending_subfolders and not self._is_cancelled:
+                            current_batch = pending_subfolders
+                            pending_subfolders = []
 
-                        futures = [
-                            executor.submit(fetch_folder_entries, api_path, rel_dir)
-                            for api_path, rel_dir in current_batch
-                        ]
+                            futures = [
+                                executor.submit(fetch_folder_entries, api_path, rel_dir)
+                                for api_path, rel_dir in current_batch
+                            ]
 
-                        for future in as_completed(futures):
-                            if self._is_cancelled:
-                                break
-                            try:
-                                sub_items, sub_folders = future.result()
-                                entries.extend(sub_items)
-                                pending_subfolders.extend(sub_folders)
-                            except Exception:
-                                pass
+                            for future in as_completed(futures):
+                                if self._is_cancelled:
+                                    break
+                                try:
+                                    sub_items, sub_folders = future.result()
+                                    entries.extend(sub_items)
+                                    pending_subfolders.extend(sub_folders)
+                                except Exception:
+                                    pass
 
             if self._is_cancelled:
                 return
@@ -398,8 +457,76 @@ class DownloadWorker(QObject):
         self.errors = 0
         self.bytes_done = 0
         self.started: float = 0.0
+        self.current_downloading_bytes: int = 0
+        self.is_currently_downloading: bool = False
+        self.is_verifying: bool = False
+        self.instant_speed: float = 0.0
+        self._last_chunk_time: float = 0.0
+        self._last_stats_emit_time: float = 0.0
+        self._speed_window: list[tuple[float, int]] = []
+
+    def update_speed_tracker(self, bytes_chunk: int):
+        now = time.time()
+        self._last_chunk_time = now
+        self._speed_window.append((now, bytes_chunk))
+        cutoff = now - 2.0
+        self._speed_window = [(t, b) for t, b in self._speed_window if t >= cutoff]
+        if len(self._speed_window) >= 2:
+            duration = now - self._speed_window[0][0]
+            if duration >= 0.05:
+                window_bytes = sum(b for t, b in self._speed_window)
+                raw_speed = window_bytes / duration
+                if self.instant_speed <= 0:
+                    self.instant_speed = raw_speed
+                else:
+                    self.instant_speed = (self.instant_speed * 0.75) + (raw_speed * 0.25)
+        elif not self._speed_window:
+            self.instant_speed = 0.0
+
+    def emit_stats(self, custom_speed: str | None = None, force: bool = False):
+        now = time.time()
+        if not force and custom_speed is None and (now - self._last_stats_emit_time < 0.08):
+            return
+        self._last_stats_emit_time = now
+
+        if self._is_paused:
+            speed_str = "Paused"
+        elif custom_speed:
+            speed_str = custom_speed
+        else:
+            if now - self._last_chunk_time > 1.5:
+                self.instant_speed = 0.0
+                self._speed_window.clear()
+            if self.is_verifying:
+                speed_str = f"{format_bytes(int(self.instant_speed))}/s (Verify)" if self.instant_speed > 0 else "0 B/s (Verify)"
+            else:
+                speed_str = f"{format_bytes(int(self.instant_speed))}/s"
+
+        active_elapsed = 0.0
+        if self.started > 0:
+            active_elapsed = now - self.started - self.paused_duration
+            if self._is_paused and self.pause_start_time > 0:
+                active_elapsed -= (now - self.pause_start_time)
+            active_elapsed = max(active_elapsed, 0.0)
+
+        total_count = max(len(self.files), 1)
+        if self.is_verifying or self.verify_only:
+            files_str = f"{self.verified_ok}/{total_count} verified"
+        else:
+            processed = min(self.done + self.skipped + (1 if self.is_currently_downloading else 0), total_count)
+            files_str = f"{processed}/{total_count} files"
+
+        current_bytes = self.bytes_done + self.current_downloading_bytes
+
+        self.stats_changed.emit({
+            "speed": speed_str,
+            "data": format_bytes(current_bytes),
+            "files": files_str,
+            "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
+        })
 
     def is_selected(self, rel_path: str) -> bool:
+
         return is_path_selected(
             rel_path,
             self.selected_files,
@@ -515,19 +642,75 @@ class DownloadWorker(QObject):
         if self.stop_requested:
             return
 
+        rec_success = False
+        try:
+            res: Any = dbx.files_list_folder(
+                path="",
+                shared_link=shared_link,
+                recursive=True,
+                include_non_downloadable_files=True,
+            )
+            while res and not self.stop_requested:
+                if hasattr(res, "entries"):
+                    for e in res.entries:
+                        if self.stop_requested:
+                            break
+                        if isinstance(e, FileMetadata):
+                            path_display = getattr(e, "path_display", None) or getattr(e, "path_lower", None)
+                            rel = path_display.lstrip("/") if path_display else e.name
+                            api_path = path_display if (path_display and path_display.startswith("/")) else f"/{rel}"
+                            entry_hash = getattr(e, "content_hash", None)
+                            self.files.append(
+                                DownloadFileItem(
+                                    name=e.name,
+                                    size=getattr(e, "size", 0) or 0,
+                                    rel_path=rel,
+                                    api_path=api_path,
+                                    metadata=e,
+                                    content_hash=entry_hash,
+                                )
+                            )
+                        elif isinstance(e, FolderMetadata):
+                            self.folders += 1
+                if getattr(res, "has_more", False) and not self.stop_requested:
+                    res = dbx.files_list_folder_continue(res.cursor)
+                else:
+                    break
+            if self.files or self.folders:
+                return
+        except Exception:
+            self.files = []
+            self.folders = 0
+
         def fetch_folder_entries(api_path: str, rel_dir: str) -> tuple[list[DownloadFileItem], list[tuple[str, str]], int]:
             if self.stop_requested:
                 return [], [], 0
             local_files: list[DownloadFileItem] = []
             local_subfolders: list[tuple[str, str]] = []
             folder_count = 0
+            max_retries = 3
+            res: Any = None
             try:
-                res: Any = dbx.files_list_folder(
-                    path=api_path,
-                    shared_link=shared_link,
-                    recursive=False,
-                    include_non_downloadable_files=True,
-                )
+                for attempt in range(max_retries):
+                    if self.stop_requested:
+                        break
+                    try:
+                        res = dbx.files_list_folder(
+                            path=api_path,
+                            shared_link=shared_link,
+                            recursive=False,
+                            include_non_downloadable_files=True,
+                        )
+                        break
+                    except Exception as exc:
+                        if attempt < max_retries - 1 and not self.stop_requested:
+                            time.sleep(1.0 * (attempt + 1))
+                        else:
+                            if "shared_link_access_denied" in str(exc) or "password" in str(exc).lower():
+                                self.log.emit(f"🔒 Access denied listing {api_path or '/'}: Password may be required.")
+                            else:
+                                self.log.emit(f"ERROR listing {api_path or '/'}: {exc}")
+                            break
                 while res:
                     if self.stop_requested:
                         break
@@ -555,7 +738,16 @@ class DownloadWorker(QObject):
                                 sub_api = f"{api_path}/{e.name}" if api_path else f"/{e.name}"
                                 local_subfolders.append((sub_api, sub_rel))
                     if getattr(res, "has_more", False) and not self.stop_requested:
-                        res = dbx.files_list_folder_continue(res.cursor)
+                        for attempt in range(max_retries):
+                            try:
+                                res = dbx.files_list_folder_continue(res.cursor)
+                                break
+                            except Exception:
+                                if attempt < max_retries - 1 and not self.stop_requested:
+                                    time.sleep(1.0 * (attempt + 1))
+                                else:
+                                    res = None
+                                    break
                     else:
                         break
             except Exception as exc:
@@ -570,7 +762,7 @@ class DownloadWorker(QObject):
         self.folders += root_folders_count
 
         if pending_subfolders and not self.stop_requested:
-            max_workers = min(16, max(4, len(pending_subfolders)))
+            max_workers = min(4, max(2, len(pending_subfolders)))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 while pending_subfolders and not self.stop_requested:
                     current_batch = pending_subfolders
@@ -592,7 +784,14 @@ class DownloadWorker(QObject):
                         except Exception:
                             pass
 
-    def download_one(self, dbx: dropbox.Dropbox, entry: Any, local_root: Path, total_files: int | None = None):
+    def download_one(
+        self,
+        dbx: dropbox.Dropbox,
+        entry: Any,
+        local_root: Path,
+        total_files: int | None = None,
+        allow_requeue: bool = True,
+    ) -> str | None:
         if isinstance(entry, DownloadFileItem):
             rel = entry.rel_path
             api_path = entry.api_path
@@ -628,92 +827,208 @@ class DownloadWorker(QObject):
                 self.bytes_done += file_size
                 self.current_progress.emit(100)
                 self.log.emit(f"SKIP  [{folder_display}] {file_display} (already exists)")
-                return
+                return None
 
-        temp_file = local_file.with_name(f"{local_file.name}.tmp_{int(time.time())}")
+        max_retries = 10
         self.log.emit(f"GET   [{folder_display}] {file_display} ({format_bytes(file_size)})")
+        self.is_currently_downloading = True
+        self.current_downloading_bytes = 0
+        self.emit_stats()
 
-        try:
-            download_kwargs: dict[str, Any] = {"url": self.url, "path": api_path}
-            if self.link_password:
-                download_kwargs["link_password"] = self.link_password
+        for attempt in range(1, max_retries + 1):
+            self._check_pause()
+            if self.stop_requested:
+                self.is_currently_downloading = False
+                self.current_downloading_bytes = 0
+                return None
 
-            res: Any = dbx.sharing_get_shared_link_file(**download_kwargs)
-            metadata, response = res
-            downloaded = 0
-            start_time = time.time()
+            # Keep OAuth access token fresh for long-running sessions (e.g. 4+ hours)
+            try:
+                if hasattr(dbx, "check_and_refresh_access_token"):
+                    dbx.check_and_refresh_access_token()
+            except Exception:
+                pass
 
-            with open(temp_file, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 128):
-                    self._check_pause()
-                    if self.stop_requested:
-                        f.close()
-                        temp_file.unlink(missing_ok=True)
-                        return
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if file_size > 0:
-                            pct = int(downloaded * 100 / file_size)
-                            self.current_progress.emit(pct)
+            temp_file = local_file.with_name(f"{local_file.name}.tmp")
+            use_range = False
 
-                    if self._is_paused:
-                        speed_str = "Paused"
-                    else:
-                        elapsed = max(time.time() - start_time, 0.001)
-                        speed = downloaded / elapsed
-                        speed_str = f"{format_bytes(int(speed))}/s"
+            try:
+                existing_bytes = temp_file.stat().st_size if temp_file.exists() else 0
 
-                    active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
-                    total_count = total_files if total_files is not None else len(self.files)
-                    self.stats_changed.emit({
-                        "speed": speed_str,
-                        "data": f"{format_bytes(self.bytes_done + downloaded)}",
-                        "files": f"{min(self.done + self.skipped + 1, total_count)}/{total_count} files",
-                        "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
-                    })
+                if file_size > 0 and existing_bytes == file_size:
+                    exp_hash = getattr(entry, "content_hash", None)
+                    calc = compute_dropbox_content_hash(
+                        temp_file,
+                        check_pause_func=self._check_pause,
+                        stop_check_func=lambda: self.stop_requested,
+                    ) if exp_hash else None
 
-            actual = temp_file.stat().st_size
-            if actual != file_size:
-                temp_file.unlink(missing_ok=True)
-                raise IOError(f"size mismatch: expected {file_size}, got {actual}")
+                    if not exp_hash or (calc and calc.lower() == exp_hash.lower()):
+                        os.replace(temp_file, local_file)
+                        self.done += 1
+                        self.bytes_done += existing_bytes
+                        self.is_currently_downloading = False
+                        self.current_downloading_bytes = 0
+                        self.current_progress.emit(100)
+                        self.log.emit(f"DONE  [{folder_display}] {file_display} (resumed complete)")
+                        self.emit_stats(force=True)
+                        return None
 
-            exp_hash = getattr(entry, "content_hash", None) or getattr(metadata, "content_hash", None)
-            if exp_hash:
-                calc = compute_dropbox_content_hash(
-                    temp_file,
-                    check_pause_func=self._check_pause,
-                    stop_check_func=lambda: self.stop_requested,
-                )
-                if not self.stop_requested and calc and calc.lower() != exp_hash.lower():
+                if existing_bytes >= file_size or existing_bytes < 0:
+                    existing_bytes = 0
                     temp_file.unlink(missing_ok=True)
-                    raise IOError(f"checksum mismatch: expected {exp_hash}, got {calc}")
 
-            if hasattr(entry, "content_hash") and not getattr(entry, "content_hash", None) and exp_hash:
-                entry.content_hash = exp_hash
+                # Safety rewind by up to 4KB to discard any partial/dirty tail chunk from a previous connection crash
+                if file_size > 0 and 0 < existing_bytes < file_size:
+                    rewind_bytes = min(4096, existing_bytes)
+                    existing_bytes -= rewind_bytes
+                    try:
+                        with open(temp_file, "r+b") as pf:
+                            pf.seek(existing_bytes)
+                            pf.truncate()
+                    except Exception:
+                        pass
 
-            os.replace(temp_file, local_file)
-            self.done += 1
-            self.bytes_done += actual
-            self.current_progress.emit(100)
-            self.log.emit(f"DONE  [{folder_display}] {file_display}")
-            active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
-            total_count = total_files if total_files is not None else len(self.files)
-            self.stats_changed.emit({
-                "speed": "0 B/s",
-                "data": f"{format_bytes(self.bytes_done)}",
-                "files": f"{min(self.done + self.skipped, total_count)}/{total_count} files",
-                "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
-            })
+                download_kwargs: dict[str, Any] = {"url": self.url, "path": api_path}
+                if self.link_password:
+                    download_kwargs["link_password"] = self.link_password
 
-        except Exception as exc:
-            temp_file.unlink(missing_ok=True)
-            self.errors += 1
-            if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
-                self.log.emit(f"🔒 ERROR [{folder_display}] {file_display}: Password protected. Verify link password.")
-            else:
-                err_title, err_desc = parse_friendly_error(exc)
-                self.log.emit(f"❌ ERROR [{folder_display}] {file_display}: {err_title} ({err_desc.splitlines()[0]})")
+                use_range = (existing_bytes > 0 and file_size > 0)
+                if use_range:
+                    if not hasattr(dbx, "_headers") or dbx._headers is None:
+                        dbx._headers = {}
+                    dbx._headers["Range"] = f"bytes={existing_bytes}-"
+                    pct_already = int(existing_bytes * 100 / file_size)
+                    self.log.emit(
+                        f"🔄 RESUME [{folder_display}] {file_display}: Continuing from {format_bytes(existing_bytes)} / {format_bytes(file_size)} ({pct_already}%) [Attempt {attempt}/{max_retries}]"
+                    )
+
+                try:
+                    res: Any = dbx.sharing_get_shared_link_file(**download_kwargs)
+                finally:
+                    if hasattr(dbx, "_headers") and isinstance(dbx._headers, dict):
+                        dbx._headers.pop("Range", None)
+
+                metadata, response = res
+                status_code = getattr(response, "status_code", None)
+                is_partial = (status_code == 206) or ("Content-Range" in getattr(response, "headers", {}))
+
+                if is_partial and use_range:
+                    downloaded = existing_bytes
+                    open_mode = "ab"
+                else:
+                    if use_range and not is_partial:
+                        if allow_requeue:
+                            self.log.emit(
+                                f"⏳ QUEUE [{folder_display}] {file_display}: Range request not permitted by server right now (HTTP {status_code}). Re-queuing file to try again later..."
+                            )
+                            self.is_currently_downloading = False
+                            self.current_downloading_bytes = 0
+                            return "requeue"
+                        else:
+                            self.log.emit(f"⚠️ Range request not supported by server for {file_display}, restarting from 0")
+                    downloaded = 0
+                    open_mode = "wb"
+
+                self.current_downloading_bytes = downloaded
+                if file_size > 0:
+                    self.current_progress.emit(int(downloaded * 100 / file_size))
+                self.emit_stats()
+
+                start_time = time.time()
+                last_chunk_time = time.time()
+
+                with open(temp_file, open_mode) as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 128):
+                        now = time.time()
+                        if now - last_chunk_time > 30.0:
+                            raise TimeoutError("Socket stream stalled: no data received for 30 seconds.")
+                        last_chunk_time = now
+
+                        self._check_pause()
+                        if self.stop_requested:
+                            f.close()
+                            self.is_currently_downloading = False
+                            self.current_downloading_bytes = 0
+                            return None
+                        if chunk:
+                            f.write(chunk)
+                            f.flush()
+                            chunk_len = len(chunk)
+                            downloaded += chunk_len
+                            self.current_downloading_bytes = downloaded
+                            self.update_speed_tracker(chunk_len)
+                            self.emit_stats()
+                            if file_size > 0:
+                                pct = int(downloaded * 100 / file_size)
+                                self.current_progress.emit(pct)
+
+                actual = temp_file.stat().st_size
+                if actual != file_size:
+                    raise IOError(f"size mismatch: expected {file_size}, got {actual}")
+
+                exp_hash = getattr(entry, "content_hash", None) or getattr(metadata, "content_hash", None)
+                if exp_hash:
+                    calc = compute_dropbox_content_hash(
+                        temp_file,
+                        check_pause_func=self._check_pause,
+                        stop_check_func=lambda: self.stop_requested,
+                    )
+                    if not self.stop_requested and calc and calc.lower() != exp_hash.lower():
+                        temp_file.unlink(missing_ok=True)
+                        raise IOError(f"checksum mismatch: expected {exp_hash}, got {calc}")
+
+                if hasattr(entry, "content_hash") and not getattr(entry, "content_hash", None) and exp_hash:
+                    entry.content_hash = exp_hash
+
+                os.replace(temp_file, local_file)
+                self.done += 1
+                self.bytes_done += actual
+                self.is_currently_downloading = False
+                self.current_downloading_bytes = 0
+                self.current_progress.emit(100)
+                self.log.emit(f"DONE  [{folder_display}] {file_display}")
+                self.emit_stats(force=True)
+                return None
+
+            except Exception as exc:
+                if use_range and allow_requeue and ("416" in str(exc) or "range" in str(exc).lower()):
+                    self.log.emit(
+                        f"⏳ QUEUE [{folder_display}] {file_display}: Server Range error ({parse_friendly_error(exc)[0]}). Re-queuing file to try again later..."
+                    )
+                    self.is_currently_downloading = False
+                    self.current_downloading_bytes = 0
+                    return "requeue"
+
+                if "416" in str(exc) or "checksum mismatch" in str(exc).lower() or "size mismatch" in str(exc).lower():
+                    temp_file.unlink(missing_ok=True)
+
+                if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
+                    temp_file.unlink(missing_ok=True)
+                    self.errors += 1
+                    self.log.emit(f"🔒 ERROR [{folder_display}] {file_display}: Password protected. Verify link password.")
+                    return None
+
+                if attempt < max_retries and not self.stop_requested:
+                    err_title, _ = parse_friendly_error(exc)
+                    curr_saved = temp_file.stat().st_size if temp_file.exists() else 0
+                    progress_info = f" ({format_bytes(curr_saved)} saved)" if curr_saved > 0 else ""
+                    wait_sec = min(attempt * 2, 10)
+                    self.log.emit(
+                        f"⚠️ RETRY [{folder_display}] {file_display} (Attempt {attempt}/{max_retries}){progress_info}: {err_title} - Retrying in {wait_sec}s..."
+                    )
+                    for _ in range(wait_sec * 10):
+                        if self.stop_requested:
+                            return None
+                        self._check_pause()
+                        time.sleep(0.1)
+                else:
+                    self.errors += 1
+                    err_title, err_desc = parse_friendly_error(exc)
+                    self.log.emit(
+                        f"❌ ERROR [{folder_display}] {file_display}: {err_title} ({err_desc.splitlines()[0]}) after {max_retries} attempts"
+                    )
+                    return None
 
     @Slot()
     def run(self):
@@ -845,7 +1160,7 @@ class DownloadWorker(QObject):
                     existing_items: list[DownloadFileItem] = []
                     remaining_items: list[DownloadFileItem] = []
 
-                    for entry in self.files:
+                    for s_idx, entry in enumerate(self.files, start=1):
                         self._check_pause()
                         if self.stop_requested:
                             self.finished.emit("Download stopped.")
@@ -859,6 +1174,8 @@ class DownloadWorker(QObject):
                             rel_clean = entry.rel_path.replace("\\", "/").strip("/")
                             folder_display = Path(rel_clean).parent.as_posix() if "/" in rel_clean else "/ (Root)"
                             self.log.emit(f"SKIP  [{folder_display}] {entry.name} (already exists)")
+                            self.overall_progress.emit(int(s_idx * 100 / total_selected))
+                            self.emit_stats()
                         else:
                             remaining_items.append(entry)
 
@@ -872,13 +1189,7 @@ class DownloadWorker(QObject):
                     if total_selected > 0:
                         self.overall_progress.emit(int(len(existing_items) * 100 / total_selected))
 
-                    active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
-                    self.stats_changed.emit({
-                        "speed": "0 B/s",
-                        "data": f"{format_bytes(self.bytes_done)}",
-                        "files": f"{self.skipped}/{total_selected} files",
-                        "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
-                    })
+                    self.emit_stats()
 
                     files_to_download = remaining_items
                 else:
@@ -908,25 +1219,52 @@ class DownloadWorker(QObject):
 
             if not self.verify_only:
                 initial_offset = total_selected - len(files_to_download)
+                download_queue: list[DownloadFileItem] = list(files_to_download)
+                requeue_counts: dict[str, int] = {}
+                processed_count = 0
 
-                for index, entry in enumerate(files_to_download, start=1):
+                while download_queue and not self.stop_requested:
                     self._check_pause()
                     if self.stop_requested:
                         break
 
-                    current_index = initial_offset + index
+                    entry = download_queue.pop(0)
+                    entry_key = getattr(entry, "rel_path", None) or getattr(entry, "name", str(entry))
+
+                    processed_count += 1
+                    current_index = initial_offset + processed_count
                     self.overall_progress.emit(
                         int((current_index - 1) * 100 / max(total_selected, 1))
                     )
 
-                    self.download_one(dbx, entry, local_root, total_files=total_selected)
+                    times_requeued = requeue_counts.get(entry_key, 0)
+                    can_requeue = (times_requeued < 3)
 
-                    self.overall_progress.emit(
-                        int(current_index * 100 / max(total_selected, 1))
+                    res_status = self.download_one(
+                        dbx,
+                        entry,
+                        local_root,
+                        total_files=total_selected,
+                        allow_requeue=can_requeue,
                     )
+
+                    if res_status == "requeue":
+                        new_count = times_requeued + 1
+                        requeue_counts[entry_key] = new_count
+                        download_queue.append(entry)
+                        processed_count -= 1
+                        file_disp = getattr(entry, "name", "file")
+                        self.log.emit(
+                            f"⏳ REQUEUED [{file_disp}] -> Moved to end of download queue (Attempt {new_count}/3)"
+                        )
+                    else:
+                        self.overall_progress.emit(
+                            int(current_index * 100 / max(total_selected, 1))
+                        )
 
             # Verification Phase: Checks integrity of all selected files
             if self.verify_integrity and not self.stop_requested and total_selected > 0:
+                self.is_verifying = True
                 self.log.emit("\n" + "=" * 60)
                 if self.verify_only:
                     self.log.emit(f"🔍 Starting File Integrity Verification ({total_selected} file(s))...")
@@ -972,10 +1310,12 @@ class DownloadWorker(QObject):
 
                     # Hash check
                     expected_hash = entry.content_hash or (getattr(entry.metadata, "content_hash", None) if entry.metadata else None)
-                    v_start_time = time.time()
                     try:
-                        def on_v_prog(pct: int):
+                        def on_v_prog(pct: int, chunk_len: int = 0):
                             self.current_progress.emit(pct)
+                            if chunk_len > 0:
+                                self.update_speed_tracker(chunk_len)
+                            self.emit_stats()
 
                         calc_hash = compute_dropbox_content_hash(
                             local_file,
@@ -1006,16 +1346,8 @@ class DownloadWorker(QObject):
                         corrupted_items.append((entry, f"unreadable: {err}"))
 
                     self.overall_progress.emit(int(v_idx * 100 / total_selected))
+                    self.emit_stats()
 
-                    v_elapsed = max(time.time() - v_start_time, 0.001)
-                    v_speed = entry.size / v_elapsed
-                    active_elapsed = max(time.time() - self.started - self.paused_duration, 0)
-                    self.stats_changed.emit({
-                        "speed": f"{format_bytes(int(v_speed))}/s (Verify)",
-                        "data": f"{format_bytes(self.bytes_done)}",
-                        "files": f"{self.verified_ok}/{total_selected} verified",
-                        "elapsed": f"{int(active_elapsed // 60):02d}:{int(active_elapsed % 60):02d}",
-                    })
 
                 # Auto-Repair Phase
                 if self.auto_repair and corrupted_items and not self.stop_requested and not self.verify_only:
