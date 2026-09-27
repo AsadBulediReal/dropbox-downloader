@@ -857,11 +857,23 @@ class DownloadWorker(QObject):
 
                 if file_size > 0 and existing_bytes == file_size:
                     exp_hash = getattr(entry, "content_hash", None)
-                    calc = compute_dropbox_content_hash(
-                        temp_file,
-                        check_pause_func=self._check_pause,
-                        stop_check_func=lambda: self.stop_requested,
-                    ) if exp_hash else None
+                    if exp_hash:
+                        self.file_changed.emit(f"🔍 Verifying file (0%): {file_display}")
+                        def _on_existing_hash_prog(pct: int, chunk_len: int = 0):
+                            self.current_progress.emit(pct)
+                            self.file_changed.emit(f"🔍 Verifying file ({pct}%): {file_display}")
+                            if chunk_len > 0:
+                                self.update_speed_tracker(chunk_len)
+                            self.emit_stats()
+
+                        calc = compute_dropbox_content_hash(
+                            temp_file,
+                            check_pause_func=self._check_pause,
+                            progress_cb=_on_existing_hash_prog,
+                            stop_check_func=lambda: self.stop_requested,
+                        )
+                    else:
+                        calc = None
 
                     if not exp_hash or (calc and calc.lower() == exp_hash.lower()):
                         os.replace(temp_file, local_file)
@@ -969,9 +981,18 @@ class DownloadWorker(QObject):
 
                 exp_hash = getattr(entry, "content_hash", None) or getattr(metadata, "content_hash", None)
                 if exp_hash:
+                    self.file_changed.emit(f"🔍 Verifying file (0%): {file_display}")
+                    def _on_hash_prog(pct: int, chunk_len: int = 0):
+                        self.current_progress.emit(pct)
+                        self.file_changed.emit(f"🔍 Verifying file ({pct}%): {file_display}")
+                        if chunk_len > 0:
+                            self.update_speed_tracker(chunk_len)
+                        self.emit_stats()
+
                     calc = compute_dropbox_content_hash(
                         temp_file,
                         check_pause_func=self._check_pause,
+                        progress_cb=_on_hash_prog,
                         stop_check_func=lambda: self.stop_requested,
                     )
                     if not self.stop_requested and calc and calc.lower() != exp_hash.lower():
@@ -981,6 +1002,7 @@ class DownloadWorker(QObject):
                 if hasattr(entry, "content_hash") and not getattr(entry, "content_hash", None) and exp_hash:
                     entry.content_hash = exp_hash
 
+                self.file_changed.emit(f"💾 Finalizing file: {file_display}")
                 os.replace(temp_file, local_file)
                 self.done += 1
                 self.bytes_done += actual
@@ -1311,8 +1333,10 @@ class DownloadWorker(QObject):
                     # Hash check
                     expected_hash = entry.content_hash or (getattr(entry.metadata, "content_hash", None) if entry.metadata else None)
                     try:
+                        self.file_changed.emit(f"🔍 Verifying file (0%): {file_display}")
                         def on_v_prog(pct: int, chunk_len: int = 0):
                             self.current_progress.emit(pct)
+                            self.file_changed.emit(f"🔍 Verifying file ({pct}%): {file_display}")
                             if chunk_len > 0:
                                 self.update_speed_tracker(chunk_len)
                             self.emit_stats()
@@ -1373,9 +1397,18 @@ class DownloadWorker(QObject):
                             try:
                                 repaired_size = bad_path.stat().st_size
                                 if repaired_size == bad_entry.size:
+                                    self.file_changed.emit(f"🔍 Verifying repaired file (0%): {file_display}")
+                                    def on_repair_v_prog(pct: int, chunk_len: int = 0):
+                                        self.current_progress.emit(pct)
+                                        self.file_changed.emit(f"🔍 Verifying repaired file ({pct}%): {file_display}")
+                                        if chunk_len > 0:
+                                            self.update_speed_tracker(chunk_len)
+                                        self.emit_stats()
+
                                     calc_h = compute_dropbox_content_hash(
                                         bad_path,
                                         check_pause_func=self._check_pause,
+                                        progress_cb=on_repair_v_prog,
                                         stop_check_func=lambda: self.stop_requested,
                                     )
                                     exp_h = bad_entry.content_hash or (getattr(bad_entry.metadata, "content_hash", None) if bad_entry.metadata else None)
