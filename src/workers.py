@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 import threading
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -829,11 +830,14 @@ class DownloadWorker(QObject):
                 self.log.emit(f"SKIP  [{folder_display}] {file_display} (already exists)")
                 return None
 
-        max_retries = 10
+        max_retries = 6
         self.log.emit(f"GET   [{folder_display}] {file_display} ({format_bytes(file_size)})")
         self.is_currently_downloading = True
         self.current_downloading_bytes = 0
         self.emit_stats()
+
+        consecutive_stalls = 0
+        last_successful_bytes = -1
 
         for attempt in range(1, max_retries + 1):
             self._check_pause()
@@ -841,6 +845,17 @@ class DownloadWorker(QObject):
                 self.is_currently_downloading = False
                 self.current_downloading_bytes = 0
                 return None
+
+            # Re-create client session on consecutive connection stalls to refresh stale TCP connection pools
+            if attempt >= 2 and consecutive_stalls >= 1:
+                try:
+                    dbx = create_dropbox_client(
+                        access_token=self.access_token,
+                        refresh_token=self.refresh_token,
+                        app_key=self.app_key,
+                    )
+                except Exception:
+                    pass
 
             # Keep OAuth access token fresh for long-running sessions (e.g. 4+ hours)
             try:
@@ -890,16 +905,18 @@ class DownloadWorker(QObject):
                     existing_bytes = 0
                     temp_file.unlink(missing_ok=True)
 
-                # Safety rewind by up to 4KB to discard any partial/dirty tail chunk from a previous connection crash
+                # Safety rewind by up to 4KB to discard partial/dirty tail chunk from a previous connection crash.
+                # Only rewind if bytes were added or on initial file resume (prevents cumulative byte loss across zero-progress retries).
                 if file_size > 0 and 0 < existing_bytes < file_size:
-                    rewind_bytes = min(4096, existing_bytes)
-                    existing_bytes -= rewind_bytes
-                    try:
-                        with open(temp_file, "r+b") as pf:
-                            pf.seek(existing_bytes)
-                            pf.truncate()
-                    except Exception:
-                        pass
+                    if last_successful_bytes == -1 or existing_bytes > last_successful_bytes:
+                        rewind_bytes = min(4096, existing_bytes)
+                        existing_bytes -= rewind_bytes
+                        try:
+                            with open(temp_file, "r+b") as pf:
+                                pf.seek(existing_bytes)
+                                pf.truncate()
+                        except Exception:
+                            pass
 
                 download_kwargs: dict[str, Any] = {"url": self.url, "path": api_path}
                 if self.link_password:
@@ -913,6 +930,10 @@ class DownloadWorker(QObject):
                     pct_already = int(existing_bytes * 100 / file_size)
                     self.log.emit(
                         f"🔄 RESUME [{folder_display}] {file_display}: Continuing from {format_bytes(existing_bytes)} / {format_bytes(file_size)} ({pct_already}%) [Attempt {attempt}/{max_retries}]"
+                    )
+                elif attempt > 1:
+                    self.log.emit(
+                        f"🔄 RESTART [{folder_display}] {file_display}: Downloading from 0% [Attempt {attempt}/{max_retries}]"
                     )
 
                 try:
@@ -930,15 +951,12 @@ class DownloadWorker(QObject):
                     open_mode = "ab"
                 else:
                     if use_range and not is_partial:
-                        if allow_requeue:
-                            self.log.emit(
-                                f"⏳ QUEUE [{folder_display}] {file_display}: Range request not permitted by server right now (HTTP {status_code}). Re-queuing file to try again later..."
-                            )
-                            self.is_currently_downloading = False
-                            self.current_downloading_bytes = 0
-                            return "requeue"
+                        if attempt < max_retries:
+                            raise IOError(f"Server returned HTTP {status_code} instead of 206 Partial Content for range resume")
                         else:
-                            self.log.emit(f"⚠️ Range request not supported by server for {file_display}, restarting from 0")
+                            self.log.emit(
+                                f"⚠️ RESTART [{folder_display}] {file_display}: Range request not supported by server. Restarting download from 0%..."
+                            )
                     downloaded = 0
                     open_mode = "wb"
 
@@ -975,9 +993,9 @@ class DownloadWorker(QObject):
                                 pct = int(downloaded * 100 / file_size)
                                 self.current_progress.emit(pct)
 
-                actual = temp_file.stat().st_size
-                if actual != file_size:
-                    raise IOError(f"size mismatch: expected {file_size}, got {actual}")
+                actual_size = temp_file.stat().st_size
+                if file_size > 0 and actual_size != file_size:
+                    raise IOError(f"size mismatch: expected {file_size}, got {actual_size}")
 
                 exp_hash = getattr(entry, "content_hash", None) or getattr(metadata, "content_hash", None)
                 if exp_hash:
@@ -1005,7 +1023,7 @@ class DownloadWorker(QObject):
                 self.file_changed.emit(f"💾 Finalizing file: {file_display}")
                 os.replace(temp_file, local_file)
                 self.done += 1
-                self.bytes_done += actual
+                self.bytes_done += actual_size
                 self.is_currently_downloading = False
                 self.current_downloading_bytes = 0
                 self.current_progress.emit(100)
@@ -1014,6 +1032,13 @@ class DownloadWorker(QObject):
                 return None
 
             except Exception as exc:
+                curr_saved = temp_file.stat().st_size if temp_file.exists() else 0
+                if last_successful_bytes != -1 and curr_saved > last_successful_bytes:
+                    consecutive_stalls = 0
+                else:
+                    consecutive_stalls += 1
+                last_successful_bytes = curr_saved
+
                 if use_range and allow_requeue and ("416" in str(exc) or "range" in str(exc).lower()):
                     self.log.emit(
                         f"⏳ QUEUE [{folder_display}] {file_display}: Server Range error ({parse_friendly_error(exc)[0]}). Re-queuing file to try again later..."
@@ -1022,20 +1047,39 @@ class DownloadWorker(QObject):
                     self.current_downloading_bytes = 0
                     return "requeue"
 
+                # If connection stalls continuously with 0 progress on a range request, requeue or fallback to downloading from 0
+                if consecutive_stalls >= 2 and use_range:
+                    if allow_requeue:
+                        self.log.emit(
+                            f"⏳ QUEUE [{folder_display}] {file_display}: Connection stalled ({consecutive_stalls} consecutive timeouts). Moving to end of download queue to allow CDN rate limits to reset..."
+                        )
+                        self.is_currently_downloading = False
+                        self.current_downloading_bytes = 0
+                        return "requeue"
+                    else:
+                        self.log.emit(
+                            f"⚠️ RESTART [{folder_display}] {file_display}: Range resume stalled ({consecutive_stalls} consecutive timeouts). Resetting partial download and restarting from 0%..."
+                        )
+                        temp_file.unlink(missing_ok=True)
+                        consecutive_stalls = 0
+                        last_successful_bytes = -1
+                        curr_saved = 0
+
                 if "416" in str(exc) or "checksum mismatch" in str(exc).lower() or "size mismatch" in str(exc).lower():
                     temp_file.unlink(missing_ok=True)
+                    curr_saved = 0
 
                 if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
                     temp_file.unlink(missing_ok=True)
+                    curr_saved = 0
                     self.errors += 1
                     self.log.emit(f"🔒 ERROR [{folder_display}] {file_display}: Password protected. Verify link password.")
                     return None
 
                 if attempt < max_retries and not self.stop_requested:
                     err_title, _ = parse_friendly_error(exc)
-                    curr_saved = temp_file.stat().st_size if temp_file.exists() else 0
                     progress_info = f" ({format_bytes(curr_saved)} saved)" if curr_saved > 0 else ""
-                    wait_sec = min(attempt * 2, 10)
+                    wait_sec = min(consecutive_stalls * 3 + attempt * 2, 15)
                     self.log.emit(
                         f"⚠️ RETRY [{folder_display}] {file_display} (Attempt {attempt}/{max_retries}){progress_info}: {err_title} - Retrying in {wait_sec}s..."
                     )
@@ -1242,7 +1286,17 @@ class DownloadWorker(QObject):
             if not self.verify_only:
                 initial_offset = total_selected - len(files_to_download)
                 download_queue: list[DownloadFileItem] = list(files_to_download)
+                state_file = local_root / ".download_state.json"
                 requeue_counts: dict[str, int] = {}
+                if state_file.exists():
+                    try:
+                        with open(state_file, "r", encoding="utf-8") as sf:
+                            saved_state = json.load(sf)
+                            if isinstance(saved_state, dict) and "requeue_counts" in saved_state:
+                                requeue_counts = saved_state.get("requeue_counts", {})
+                    except Exception:
+                        pass
+
                 processed_count = 0
 
                 while download_queue and not self.stop_requested:
@@ -1260,7 +1314,7 @@ class DownloadWorker(QObject):
                     )
 
                     times_requeued = requeue_counts.get(entry_key, 0)
-                    can_requeue = (times_requeued < 3)
+                    can_requeue = (times_requeued < 3) and bool(download_queue)
 
                     res_status = self.download_one(
                         dbx,
@@ -1273,16 +1327,27 @@ class DownloadWorker(QObject):
                     if res_status == "requeue":
                         new_count = times_requeued + 1
                         requeue_counts[entry_key] = new_count
+                        try:
+                            with open(state_file, "w", encoding="utf-8") as sf:
+                                json.dump({"requeue_counts": requeue_counts}, sf, indent=2)
+                        except Exception:
+                            pass
                         download_queue.append(entry)
                         processed_count -= 1
                         file_disp = getattr(entry, "name", "file")
                         self.log.emit(
-                            f"⏳ REQUEUED [{file_disp}] -> Moved to end of download queue (Attempt {new_count}/3)"
+                            f"⏳ REQUEUED [{file_disp}] -> Moved to end of download queue (Queue Pass {new_count}/3)"
                         )
                     else:
                         self.overall_progress.emit(
                             int(current_index * 100 / max(total_selected, 1))
                         )
+
+                if not download_queue:
+                    try:
+                        state_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
             # Verification Phase: Checks integrity of all selected files
             if self.verify_integrity and not self.stop_requested and total_selected > 0:
