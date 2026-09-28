@@ -830,8 +830,7 @@ class DownloadWorker(QObject):
                 self.log.emit(f"SKIP  [{folder_display}] {file_display} (already exists)")
                 return None
 
-        max_retries = 6
-        self.log.emit(f"GET   [{folder_display}] {file_display} ({format_bytes(file_size)})")
+        max_retries = 3
         self.is_currently_downloading = True
         self.current_downloading_bytes = 0
         self.emit_stats()
@@ -934,6 +933,10 @@ class DownloadWorker(QObject):
                 elif attempt > 1:
                     self.log.emit(
                         f"🔄 RESTART [{folder_display}] {file_display}: Downloading from 0% [Attempt {attempt}/{max_retries}]"
+                    )
+                else:
+                    self.log.emit(
+                        f"GET   [{folder_display}] {file_display} ({format_bytes(file_size)}) [Attempt {attempt}/{max_retries}]"
                     )
 
                 try:
