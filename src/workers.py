@@ -461,6 +461,7 @@ class DownloadWorker(QObject):
         self.current_downloading_bytes: int = 0
         self.is_currently_downloading: bool = False
         self.is_verifying: bool = False
+        self.is_inline_verifying: bool = False
         self.instant_speed: float = 0.0
         self._last_chunk_time: float = 0.0
         self._last_stats_emit_time: float = 0.0
@@ -498,7 +499,7 @@ class DownloadWorker(QObject):
             if now - self._last_chunk_time > 1.5:
                 self.instant_speed = 0.0
                 self._speed_window.clear()
-            if self.is_verifying:
+            if self.is_verifying or self.is_inline_verifying:
                 speed_str = f"{format_bytes(int(self.instant_speed))}/s (Verify)" if self.instant_speed > 0 else "0 B/s (Verify)"
             else:
                 speed_str = f"{format_bytes(int(self.instant_speed))}/s"
@@ -836,7 +837,7 @@ class DownloadWorker(QObject):
         self.emit_stats()
 
         consecutive_stalls = 0
-        last_successful_bytes = -1
+        needs_rewind = True
 
         for attempt in range(1, max_retries + 1):
             self._check_pause()
@@ -865,6 +866,7 @@ class DownloadWorker(QObject):
 
             temp_file = local_file.with_name(f"{local_file.name}.tmp")
             use_range = False
+            attempt_start_bytes = 0
 
             try:
                 existing_bytes = temp_file.stat().st_size if temp_file.exists() else 0
@@ -873,6 +875,9 @@ class DownloadWorker(QObject):
                     exp_hash = getattr(entry, "content_hash", None)
                     if exp_hash:
                         self.file_changed.emit(f"🔍 Verifying file (0%): {file_display}")
+                        self.is_inline_verifying = True
+                        self._speed_window.clear()
+                        self.instant_speed = 0.0
                         def _on_existing_hash_prog(pct: int, chunk_len: int = 0):
                             self.current_progress.emit(pct)
                             self.file_changed.emit(f"🔍 Verifying file ({pct}%): {file_display}")
@@ -880,16 +885,26 @@ class DownloadWorker(QObject):
                                 self.update_speed_tracker(chunk_len)
                             self.emit_stats()
 
-                        calc = compute_dropbox_content_hash(
-                            temp_file,
-                            check_pause_func=self._check_pause,
-                            progress_cb=_on_existing_hash_prog,
-                            stop_check_func=lambda: self.stop_requested,
-                        )
+                        try:
+                            calc = compute_dropbox_content_hash(
+                                temp_file,
+                                check_pause_func=self._check_pause,
+                                progress_cb=_on_existing_hash_prog,
+                                stop_check_func=lambda: self.stop_requested,
+                            )
+                        finally:
+                            self.is_inline_verifying = False
+                            self._speed_window.clear()
+                            self.instant_speed = 0.0
+                        if self.stop_requested:
+                            self.is_currently_downloading = False
+                            self.current_downloading_bytes = 0
+                            return None
                     else:
                         calc = None
 
                     if not exp_hash or (calc and calc.lower() == exp_hash.lower()):
+                        self.file_changed.emit(f"💾 Finalizing file: {file_display}")
                         os.replace(temp_file, local_file)
                         self.done += 1
                         self.bytes_done += existing_bytes
@@ -903,19 +918,22 @@ class DownloadWorker(QObject):
                 if existing_bytes >= file_size or existing_bytes < 0:
                     existing_bytes = 0
                     temp_file.unlink(missing_ok=True)
+                    needs_rewind = False
 
                 # Safety rewind by up to 4KB to discard partial/dirty tail chunk from a previous connection crash.
                 # Only rewind if bytes were added or on initial file resume (prevents cumulative byte loss across zero-progress retries).
-                if file_size > 0 and 0 < existing_bytes < file_size:
-                    if last_successful_bytes == -1 or existing_bytes > last_successful_bytes:
-                        rewind_bytes = min(4096, existing_bytes)
-                        existing_bytes -= rewind_bytes
-                        try:
-                            with open(temp_file, "r+b") as pf:
-                                pf.seek(existing_bytes)
-                                pf.truncate()
-                        except Exception:
-                            pass
+                if file_size > 0 and 0 < existing_bytes < file_size and needs_rewind:
+                    rewind_bytes = min(4096, existing_bytes)
+                    existing_bytes -= rewind_bytes
+                    try:
+                        with open(temp_file, "r+b") as pf:
+                            pf.seek(existing_bytes)
+                            pf.truncate()
+                    except Exception:
+                        pass
+                    needs_rewind = False
+
+                attempt_start_bytes = existing_bytes
 
                 download_kwargs: dict[str, Any] = {"url": self.url, "path": api_path}
                 if self.link_password:
@@ -946,55 +964,65 @@ class DownloadWorker(QObject):
                         dbx._headers.pop("Range", None)
 
                 metadata, response = res
-                status_code = getattr(response, "status_code", None)
-                is_partial = (status_code == 206) or ("Content-Range" in getattr(response, "headers", {}))
+                try:
+                    status_code = getattr(response, "status_code", None)
+                    is_partial = (status_code == 206) or ("Content-Range" in getattr(response, "headers", {}))
 
-                if is_partial and use_range:
-                    downloaded = existing_bytes
-                    open_mode = "ab"
-                else:
-                    if use_range and not is_partial:
-                        if attempt < max_retries:
-                            raise IOError(f"Server returned HTTP {status_code} instead of 206 Partial Content for range resume")
-                        else:
+                    if is_partial and use_range:
+                        downloaded = existing_bytes
+                        open_mode = "ab"
+                    else:
+                        if use_range and not is_partial:
+                            if allow_requeue:
+                                raise IOError(f"Server returned HTTP {status_code} instead of 206 Partial Content for range resume")
                             self.log.emit(
-                                f"⚠️ RESTART [{folder_display}] {file_display}: Range request not supported by server. Restarting download from 0%..."
+                                f"⚠️ RESTART [{folder_display}] {file_display}: Range request not supported by server (HTTP {status_code}). Restarting download from 0%..."
                             )
-                    downloaded = 0
-                    open_mode = "wb"
+                            attempt_start_bytes = 0
+                        downloaded = 0
+                        open_mode = "wb"
 
-                self.current_downloading_bytes = downloaded
-                if file_size > 0:
-                    self.current_progress.emit(int(downloaded * 100 / file_size))
-                self.emit_stats()
+                    self.current_downloading_bytes = downloaded
+                    if file_size > 0:
+                        self.current_progress.emit(int(downloaded * 100 / file_size))
+                    self.emit_stats()
 
-                start_time = time.time()
-                last_chunk_time = time.time()
+                    start_time = time.time()
+                    last_chunk_time = time.time()
 
-                with open(temp_file, open_mode) as f:
-                    for chunk in response.iter_content(chunk_size=1024 * 128):
-                        now = time.time()
-                        if now - last_chunk_time > 30.0:
-                            raise TimeoutError("Socket stream stalled: no data received for 30 seconds.")
-                        last_chunk_time = now
+                    with open(temp_file, open_mode) as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 128):
+                            now = time.time()
+                            if not self._is_paused and (now - last_chunk_time > 30.0):
+                                raise TimeoutError("Socket stream stalled: no data received for 30 seconds.")
 
-                        self._check_pause()
-                        if self.stop_requested:
-                            f.close()
-                            self.is_currently_downloading = False
-                            self.current_downloading_bytes = 0
-                            return None
-                        if chunk:
-                            f.write(chunk)
-                            f.flush()
-                            chunk_len = len(chunk)
-                            downloaded += chunk_len
-                            self.current_downloading_bytes = downloaded
-                            self.update_speed_tracker(chunk_len)
-                            self.emit_stats()
-                            if file_size > 0:
-                                pct = int(downloaded * 100 / file_size)
-                                self.current_progress.emit(pct)
+                            if not self._pause_event.is_set():
+                                self._check_pause()
+                                last_chunk_time = time.time()
+                            else:
+                                last_chunk_time = now
+
+                            if self.stop_requested:
+                                f.close()
+                                self.is_currently_downloading = False
+                                self.current_downloading_bytes = 0
+                                return None
+                            if chunk:
+                                f.write(chunk)
+                                f.flush()
+                                chunk_len = len(chunk)
+                                downloaded += chunk_len
+                                self.current_downloading_bytes = downloaded
+                                self.update_speed_tracker(chunk_len)
+                                self.emit_stats()
+                                if file_size > 0:
+                                    pct = int(downloaded * 100 / file_size)
+                                    self.current_progress.emit(pct)
+                finally:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
 
                 actual_size = temp_file.stat().st_size
                 if file_size > 0 and actual_size != file_size:
@@ -1003,6 +1031,9 @@ class DownloadWorker(QObject):
                 exp_hash = getattr(entry, "content_hash", None) or getattr(metadata, "content_hash", None)
                 if exp_hash:
                     self.file_changed.emit(f"🔍 Verifying file (0%): {file_display}")
+                    self.is_inline_verifying = True
+                    self._speed_window.clear()
+                    self.instant_speed = 0.0
                     def _on_hash_prog(pct: int, chunk_len: int = 0):
                         self.current_progress.emit(pct)
                         self.file_changed.emit(f"🔍 Verifying file ({pct}%): {file_display}")
@@ -1010,15 +1041,28 @@ class DownloadWorker(QObject):
                             self.update_speed_tracker(chunk_len)
                         self.emit_stats()
 
-                    calc = compute_dropbox_content_hash(
-                        temp_file,
-                        check_pause_func=self._check_pause,
-                        progress_cb=_on_hash_prog,
-                        stop_check_func=lambda: self.stop_requested,
-                    )
-                    if not self.stop_requested and calc and calc.lower() != exp_hash.lower():
+                    try:
+                        calc = compute_dropbox_content_hash(
+                            temp_file,
+                            check_pause_func=self._check_pause,
+                            progress_cb=_on_hash_prog,
+                            stop_check_func=lambda: self.stop_requested,
+                        )
+                    finally:
+                        self.is_inline_verifying = False
+                        self._speed_window.clear()
+                        self.instant_speed = 0.0
+                    if self.stop_requested:
+                        self.is_currently_downloading = False
+                        self.current_downloading_bytes = 0
+                        return None
+                    if calc and calc.lower() != exp_hash.lower():
                         temp_file.unlink(missing_ok=True)
                         raise IOError(f"checksum mismatch: expected {exp_hash}, got {calc}")
+                elif self.stop_requested:
+                    self.is_currently_downloading = False
+                    self.current_downloading_bytes = 0
+                    return None
 
                 if hasattr(entry, "content_hash") and not getattr(entry, "content_hash", None) and exp_hash:
                     entry.content_hash = exp_hash
@@ -1036,11 +1080,16 @@ class DownloadWorker(QObject):
 
             except Exception as exc:
                 curr_saved = temp_file.stat().st_size if temp_file.exists() else 0
-                if last_successful_bytes != -1 and curr_saved > last_successful_bytes:
+                if curr_saved > attempt_start_bytes:
                     consecutive_stalls = 0
+                    needs_rewind = True
                 else:
                     consecutive_stalls += 1
-                last_successful_bytes = curr_saved
+
+                if "416" in str(exc):
+                    temp_file.unlink(missing_ok=True)
+                    curr_saved = 0
+                    needs_rewind = False
 
                 if use_range and allow_requeue and ("416" in str(exc) or "range" in str(exc).lower()):
                     self.log.emit(
@@ -1059,23 +1108,27 @@ class DownloadWorker(QObject):
                         self.is_currently_downloading = False
                         self.current_downloading_bytes = 0
                         return "requeue"
-                    else:
+                    elif attempt < max_retries:
                         self.log.emit(
                             f"⚠️ RESTART [{folder_display}] {file_display}: Range resume stalled ({consecutive_stalls} consecutive timeouts). Resetting partial download and restarting from 0%..."
                         )
                         temp_file.unlink(missing_ok=True)
                         consecutive_stalls = 0
-                        last_successful_bytes = -1
+                        needs_rewind = False
                         curr_saved = 0
 
-                if "416" in str(exc) or "checksum mismatch" in str(exc).lower() or "size mismatch" in str(exc).lower():
+                if "checksum mismatch" in str(exc).lower() or "size mismatch" in str(exc).lower():
                     temp_file.unlink(missing_ok=True)
                     curr_saved = 0
+                    needs_rewind = False
 
                 if "shared_link_access_denied" in str(exc).lower() or "password" in str(exc).lower():
                     temp_file.unlink(missing_ok=True)
                     curr_saved = 0
                     self.errors += 1
+                    self.is_currently_downloading = False
+                    self.current_downloading_bytes = 0
+                    self.emit_stats(force=True)
                     self.log.emit(f"🔒 ERROR [{folder_display}] {file_display}: Password protected. Verify link password.")
                     return None
 
@@ -1088,11 +1141,16 @@ class DownloadWorker(QObject):
                     )
                     for _ in range(wait_sec * 10):
                         if self.stop_requested:
+                            self.is_currently_downloading = False
+                            self.current_downloading_bytes = 0
                             return None
                         self._check_pause()
                         time.sleep(0.1)
                 else:
                     self.errors += 1
+                    self.is_currently_downloading = False
+                    self.current_downloading_bytes = 0
+                    self.emit_stats(force=True)
                     err_title, err_desc = parse_friendly_error(exc)
                     self.log.emit(
                         f"❌ ERROR [{folder_display}] {file_display}: {err_title} ({err_desc.splitlines()[0]}) after {max_retries} attempts"
@@ -1346,7 +1404,7 @@ class DownloadWorker(QObject):
                             int(current_index * 100 / max(total_selected, 1))
                         )
 
-                if not download_queue:
+                if not download_queue and not self.stop_requested:
                     try:
                         state_file.unlink(missing_ok=True)
                     except Exception:
@@ -1458,7 +1516,9 @@ class DownloadWorker(QObject):
                         bad_path.unlink(missing_ok=True)
 
                         # Re-download
-                        self.download_one(dbx, bad_entry, local_root, total_files=total_selected)
+                        self.download_one(dbx, bad_entry, local_root, total_files=total_selected, allow_requeue=False)
+                        if self.stop_requested:
+                            break
 
                         # Re-verify repaired file
                         if bad_path.exists() and bad_path.is_file():
@@ -1479,6 +1539,8 @@ class DownloadWorker(QObject):
                                         progress_cb=on_repair_v_prog,
                                         stop_check_func=lambda: self.stop_requested,
                                     )
+                                    if self.stop_requested:
+                                        break
                                     exp_h = bad_entry.content_hash or (getattr(bad_entry.metadata, "content_hash", None) if bad_entry.metadata else None)
                                     if not exp_h or calc_h.lower() == exp_h.lower():
                                         self.repaired += 1
