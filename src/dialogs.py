@@ -21,8 +21,14 @@ from PySide6.QtWidgets import (
 from .styles import DARK_STYLESHEET
 
 
+def _is_light_parent(parent: QWidget | None) -> bool:
+    if parent is not None and hasattr(parent, "theme_mode"):
+        return str(getattr(parent, "theme_mode", "light")).lower() == "light"
+    return False
+
+
 class ModernMessageBox(QDialog):
-    """A sleek, modern dark-themed modal dialog replacing native QMessageBox."""
+    """A sleek, modern modal dialog replacing native QMessageBox."""
 
     ICON_INFO = "info"
     ICON_WARNING = "warning"
@@ -43,12 +49,17 @@ class ModernMessageBox(QDialog):
         self.setModal(True)
         self.setMinimumWidth(440)
         self.setMaximumWidth(560)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #0c1322;
-                border: 1px solid #1f2e45;
-                border-radius: 12px;
-            }
+        is_light = _is_light_parent(parent)
+        dlg_bg = "#ffffff" if is_light else "#0c1322"
+        dlg_border = "#cbd5e1" if is_light else "#1f2e45"
+        title_fg = "#0f172a" if is_light else "#f8fafc"
+        msg_fg = "#475569" if is_light else "#cbd5e1"
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {dlg_bg};
+                border: 1px solid {dlg_border};
+                border-radius: 14px;
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -59,15 +70,24 @@ class ModernMessageBox(QDialog):
         content_row.setSpacing(16)
         content_row.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        badge_configs = {
-            self.ICON_INFO: ("ℹ", "#0c2646", "#38bdf8", "#0284c7"),
-            self.ICON_SUCCESS: ("✓", "#064e3b", "#34d399", "#059669"),
-            self.ICON_WARNING: ("⚠", "#451a03", "#fbbf24", "#d97706"),
-            self.ICON_ERROR: ("✕", "#450a0a", "#f87171", "#b91c1c"),
-            self.ICON_QUESTION: ("?", "#172554", "#60a5fa", "#2563eb"),
-        }
+        if is_light:
+            badge_configs = {
+                self.ICON_INFO: ("ℹ", "#eff6ff", "#0061ff", "#93c5fd"),
+                self.ICON_SUCCESS: ("✓", "#ecfdf5", "#059669", "#6ee7b7"),
+                self.ICON_WARNING: ("⚠", "#fffbeb", "#d97706", "#fcd34d"),
+                self.ICON_ERROR: ("✕", "#fef2f2", "#dc2626", "#fca5a5"),
+                self.ICON_QUESTION: ("?", "#eff6ff", "#2563eb", "#93c5fd"),
+            }
+        else:
+            badge_configs = {
+                self.ICON_INFO: ("ℹ", "#0c2646", "#38bdf8", "#0284c7"),
+                self.ICON_SUCCESS: ("✓", "#064e3b", "#34d399", "#059669"),
+                self.ICON_WARNING: ("⚠", "#451a03", "#fbbf24", "#d97706"),
+                self.ICON_ERROR: ("✕", "#450a0a", "#f87171", "#b91c1c"),
+                self.ICON_QUESTION: ("?", "#172554", "#60a5fa", "#2563eb"),
+            }
         symbol, bg_col, text_col, border_col = badge_configs.get(
-            icon_type, ("ℹ", "#0c2646", "#38bdf8", "#0284c7")
+            icon_type, badge_configs[self.ICON_INFO]
         )
 
         icon_label = QLabel(symbol)
@@ -83,13 +103,13 @@ class ModernMessageBox(QDialog):
         text_layout.setSpacing(6)
 
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("color: #f8fafc; font-size: 14px; font-weight: 700;")
+        title_lbl.setStyleSheet(f"color: {title_fg}; font-size: 14px; font-weight: 700; background-color: transparent;")
         text_layout.addWidget(title_lbl)
 
         msg_lbl = QLabel(message)
         msg_lbl.setWordWrap(True)
         msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        msg_lbl.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.45;")
+        msg_lbl.setStyleSheet(f"color: {msg_fg}; font-size: 12px; line-height: 1.45; background-color: transparent;")
         text_layout.addWidget(msg_lbl)
 
         content_row.addLayout(text_layout, stretch=1)
@@ -162,7 +182,7 @@ class ModernMessageBox(QDialog):
 
 
 class ModernInputDialog(QDialog):
-    """A sleek, modern dark-themed modal input dialog replacing QInputDialog."""
+    """A sleek, modern modal input dialog replacing QInputDialog."""
 
     def __init__(
         self,
@@ -180,12 +200,23 @@ class ModernInputDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(500)
         self.setMaximumWidth(640)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #0c1322;
-                border: 1px solid #1f2e45;
-                border-radius: 12px;
-            }
+        is_light = _is_light_parent(parent)
+        dlg_bg = "#ffffff" if is_light else "#0c1322"
+        dlg_border = "#cbd5e1" if is_light else "#1f2e45"
+        title_fg = "#0f172a" if is_light else "#f8fafc"
+        box_bg = "#f8fafc" if is_light else "#111a2e"
+        box_border = "#e2e8f0" if is_light else "#1e2d4a"
+        msg_fg = "#475569" if is_light else "#cbd5e1"
+        badge_bg = "#eff6ff" if is_light else "#0c2646"
+        badge_fg = "#0061ff" if is_light else "#38bdf8"
+        badge_bd = "#93c5fd" if is_light else "#0284c7"
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {dlg_bg};
+                border: 1px solid {dlg_border};
+                border-radius: 14px;
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -200,20 +231,20 @@ class ModernInputDialog(QDialog):
         icon_badge.setFixedSize(38, 38)
         icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_badge.setStyleSheet(
-            "background-color: #0c2646; color: #38bdf8; border: 1px solid #0284c7; "
+            f"background-color: {badge_bg}; color: {badge_fg}; border: 1px solid {badge_bd}; "
             "border-radius: 19px; font-size: 17px;"
         )
         header_row.addWidget(icon_badge)
 
         title_lbl = QLabel(heading)
-        title_lbl.setStyleSheet("color: #f8fafc; font-size: 14px; font-weight: 700;")
+        title_lbl.setStyleSheet(f"color: {title_fg}; font-size: 14px; font-weight: 700; background-color: transparent;")
         header_row.addWidget(title_lbl, stretch=1)
         layout.addLayout(header_row)
 
         if message:
             msg_frame = QFrame()
             msg_frame.setStyleSheet(
-                "background-color: #111a2e; border: 1px solid #1e2d4a; border-radius: 8px; padding: 12px 14px;"
+                f"background-color: {box_bg}; border: 1px solid {box_border}; border-radius: 10px; padding: 12px 14px;"
             )
             msg_layout = QVBoxLayout(msg_frame)
             msg_layout.setContentsMargins(0, 0, 0, 0)
@@ -222,7 +253,7 @@ class ModernInputDialog(QDialog):
             msg_lbl = QLabel(message)
             msg_lbl.setWordWrap(True)
             msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            msg_lbl.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.5;")
+            msg_lbl.setStyleSheet(f"color: {msg_fg}; font-size: 12px; line-height: 1.5; background-color: transparent;")
             msg_layout.addWidget(msg_lbl)
             layout.addWidget(msg_frame)
 
@@ -280,7 +311,7 @@ class ModernInputDialog(QDialog):
 
 
 class ModernLoadingDialog(QDialog):
-    """A sleek, modern dark-themed modal loader dialog with an animated progress bar and spinner."""
+    """A sleek, modern modal loader dialog with an animated progress bar and spinner."""
     cancelled = Signal()
 
     def __init__(
@@ -296,12 +327,23 @@ class ModernLoadingDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(460)
         self.setMaximumWidth(540)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #0c1322;
-                border: 1px solid #1f2e45;
-                border-radius: 12px;
-            }
+        self._is_light = _is_light_parent(parent)
+        dlg_bg = "#ffffff" if self._is_light else "#0c1322"
+        dlg_border = "#cbd5e1" if self._is_light else "#1f2e45"
+        heading_fg = "#0f172a" if self._is_light else "#f8fafc"
+        status_fg = "#64748b" if self._is_light else "#94a3b8"
+        badge_bg = "#eff6ff" if self._is_light else "#0c2646"
+        badge_fg = "#0061ff" if self._is_light else "#38bdf8"
+        badge_bd = "#93c5fd" if self._is_light else "#0284c7"
+        pbar_bg = "#f1f5f9" if self._is_light else "#090e1a"
+        pbar_bd = "#e2e8f0" if self._is_light else "#1e293b"
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {dlg_bg};
+                border: 1px solid {dlg_border};
+                border-radius: 14px;
+            }}
         """)
 
         layout = QVBoxLayout(self)
@@ -317,7 +359,7 @@ class ModernLoadingDialog(QDialog):
         self.icon_badge.setFixedSize(48, 48)
         self.icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_badge.setStyleSheet(
-            "background-color: #0c2646; color: #38bdf8; border: 1.5px solid #0284c7; "
+            f"background-color: {badge_bg}; color: {badge_fg}; border: 1.5px solid {badge_bd}; "
             "border-radius: 24px; font-size: 22px; font-weight: bold;"
         )
         header_row.addWidget(self.icon_badge)
@@ -326,12 +368,12 @@ class ModernLoadingDialog(QDialog):
         text_col.setSpacing(4)
 
         self.heading_label = QLabel(heading)
-        self.heading_label.setStyleSheet("color: #f8fafc; font-size: 15px; font-weight: 700;")
+        self.heading_label.setStyleSheet(f"color: {heading_fg}; font-size: 15px; font-weight: 700; background-color: transparent;")
         text_col.addWidget(self.heading_label)
 
         self.status_label = QLabel(status)
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.4;")
+        self.status_label.setStyleSheet(f"color: {status_fg}; font-size: 12px; line-height: 1.4; background-color: transparent;")
         text_col.addWidget(self.status_label)
 
         header_row.addLayout(text_col, stretch=1)
@@ -343,16 +385,16 @@ class ModernLoadingDialog(QDialog):
         self.progress_bar.setValue(10)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(8)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                background-color: #090e1a;
-                border: 1px solid #1e293b;
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {pbar_bg};
+                border: 1px solid {pbar_bd};
                 border-radius: 4px;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:0.5 #38bdf8, stop:1 #6366f1);
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0061ff, stop:0.5 #38bdf8, stop:1 #6366f1);
                 border-radius: 4px;
-            }
+            }}
         """)
         layout.addWidget(self.progress_bar)
 
@@ -442,8 +484,10 @@ class ModernLoadingDialog(QDialog):
         self._target_val = 100.0
         self.progress_bar.setValue(100)
         self.icon_badge.setText("✓")
+        ok_bg = "#ecfdf5" if self._is_light else "#064e3b"
+        ok_fg = "#059669" if self._is_light else "#34d399"
         self.icon_badge.setStyleSheet(
-            "background-color: #064e3b; color: #34d399; border: 1.5px solid #059669; "
+            f"background-color: {ok_bg}; color: {ok_fg}; border: 1.5px solid #059669; "
             "border-radius: 24px; font-size: 22px; font-weight: bold;"
         )
         self.heading_label.setText("Signed in successfully!")
@@ -542,4 +586,3 @@ class FileTreeWidget(QTreeWidget):
     def clear(self):
         self._anchor_item = None
         super().clear()
-

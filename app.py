@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QApplication
 
 from src import (
     DARK_STYLESHEET,
+    LIGHT_STYLESHEET,
     MainWindow,
     format_bytes,
     sanitize_filename,
@@ -35,7 +36,7 @@ from src import (
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_STYLESHEET)
+    app.setStyleSheet(LIGHT_STYLESHEET)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

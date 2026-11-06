@@ -98,6 +98,129 @@ class TestMainWindowGUI(unittest.TestCase):
         self.win.filter_logs("")
         self.assertIn("▶ Download resumed.", self.win.log_box.toPlainText())
 
+    def test_guided_wizard_steps_and_auto_advance_on_scan(self):
+        self.assertEqual(self.win.current_step, 0)
+        self.assertEqual(self.win.wizard_stack.currentIndex(), 0)
+
+        self.win.current_access_token = "test_access_token"
+        self.win.update_feature_enabled_state()
+        self.win.url_input.setText("https://www.dropbox.com/scl/fo/abc/SharedRoot")
+
+        entries = [
+            {"name": "Photos", "path": "Photos", "is_dir": True, "size": 0},
+            {"name": "1.jpg", "path": "Photos/1.jpg", "is_dir": False, "size": 1024, "content_hash": "a" * 64},
+        ]
+        tree = build_tree_hierarchy(entries, "SharedRoot")
+        self.win.on_scan_finished(tree, "SharedRoot", entries)
+
+        # Auto-advances to Step 2 (Select Files)
+        self.assertEqual(self.win.current_step, 1)
+        self.assertEqual(self.win.wizard_stack.currentIndex(), 1)
+        self.assertIn("SharedRoot", self.win.step2_folder_label.text())
+
+        # Step navigation buttons switch cleanly
+        self.win.btn_step_3.click()
+        self.assertEqual(self.win.current_step, 2)
+        self.win.btn_step_1.click()
+        self.assertEqual(self.win.current_step, 0)
+
+    def test_recent_links_chips_and_rows_in_step1(self):
+        self.win.current_access_token = "test_access_token"
+        self.win.update_feature_enabled_state()
+
+        self.win.add_recent_link("https://www.dropbox.com/scl/fo/111/Summer_Shoot", title="Summer_Shoot", item_count=12)
+        self.win.add_recent_link("https://www.dropbox.com/scl/fo/222/Brand_Kit", title="Brand_Kit", item_count=5)
+
+        self.assertEqual(len(self.win.recent_links), 2)
+        self.assertFalse(self.win.recent_chips_container.isHidden())
+        self.assertGreaterEqual(self.win.recent_rows_layout.count(), 2)
+
+        self.win.clear_recent_links()
+        self.assertEqual(len(self.win.recent_links), 0)
+        self.assertTrue(self.win.recent_chips_container.isHidden())
+
+    def test_queue_filter_tabs_and_downloaded_remaining_counters(self):
+        self.win.current_access_token = "test_access_token"
+        self.win.update_feature_enabled_state()
+
+        entries = [
+            {"name": "Photos", "path": "Photos", "is_dir": True, "size": 0},
+            {"name": "1.jpg", "path": "Photos/1.jpg", "is_dir": False, "size": 1024, "content_hash": "a" * 64},
+            {"name": "2.jpg", "path": "Photos/2.jpg", "is_dir": False, "size": 2048, "content_hash": "b" * 64},
+            {"name": "notes.txt", "path": "notes.txt", "is_dir": False, "size": 512, "content_hash": "c" * 64},
+        ]
+        tree = build_tree_hierarchy(entries, "SharedRoot")
+        self.win.on_scan_finished(tree, "SharedRoot", entries)
+
+        self.assertEqual(self.win.btn_qtab_all.text(), "All Selected (3)")
+        self.assertEqual(self.win.btn_qtab_done.text(), "✓ Downloaded (0)")
+        self.assertEqual(self.win.btn_qtab_rem.text(), "⏳ Remaining / Up Next (3)")
+        self.assertEqual(self.win.val_remaining_files.text(), "3 files left")
+
+        # Simulate active download & completion logs
+        self.win.add_log("GET   [Photos] 1.jpg (1.0 KB) [Attempt 1/3]")
+        self.win.update_file_progress(55)
+        k1 = self.win._make_queue_key("Photos", "1.jpg")
+        self.assertIn("55%", self.win._queue_tree_items[k1].text(2))
+
+        self.win.add_log("DONE  [Photos] 1.jpg")
+        self.win.add_log("SKIP  [/ (Root)] notes.txt (already exists)")
+
+        self.assertEqual(self.win.btn_qtab_done.text(), "✓ Downloaded (2)")
+        self.assertEqual(self.win.btn_qtab_rem.text(), "⏳ Remaining / Up Next (1)")
+        self.assertEqual(self.win.val_files.text(), "2 / 3 files")
+        self.assertEqual(self.win.val_remaining_files.text(), "1 file left")
+
+        # Filter: Downloaded only
+        self.win.btn_qtab_done.click()
+        k2 = self.win._make_queue_key("Photos", "2.jpg")
+        self.assertFalse(self.win._queue_tree_items[k1].isHidden())
+        self.assertTrue(self.win._queue_tree_items[k2].isHidden())
+
+        # Filter: Remaining only
+        self.win.btn_qtab_rem.click()
+        self.assertTrue(self.win._queue_tree_items[k1].isHidden())
+        self.assertFalse(self.win._queue_tree_items[k2].isHidden())
+
+        # Filter: All
+        self.win.btn_qtab_all.click()
+        self.assertFalse(self.win._queue_tree_items[k1].isHidden())
+        self.assertFalse(self.win._queue_tree_items[k2].isHidden())
+
+    def test_corner_settings_drawer_and_theme_toggle(self):
+        self.assertTrue(self.win.settings_overlay.isHidden())
+        self.win.btn_settings.click()
+        self.assertFalse(self.win.settings_overlay.isHidden())
+
+        self.assertEqual(self.win.theme_mode, "light")
+        self.win.btn_theme_toggle.click()
+        self.assertEqual(self.win.theme_mode, "dark")
+        self.win.btn_theme_toggle.click()
+        self.assertEqual(self.win.theme_mode, "light")
+
+        self.win.btn_close_settings.click()
+        self.assertTrue(self.win.settings_overlay.isHidden())
+
+    def test_ad_banner_rotation_and_url_safety(self):
+        from src.ads import sanitize_ad_entries
+
+        cleaned = sanitize_ad_entries(
+            [
+                {"title": "Bad Ad", "description": "XSS", "url": "javascript:alert(1)"},
+                {"badge": "Partner", "title": "Cloud Pro", "description": "Fast backup", "cta": "Try →", "url": "https://example.com/deal"},
+            ]
+        )
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned[0]["title"], "Cloud Pro")
+
+        first_title = self.win.ad_banner.current_ad["title"]
+        self.win.ad_banner.next_ad()
+        self.assertNotEqual(self.win.ad_banner.current_ad["title"], first_title)
+
+        with patch("src.ads.webbrowser.open") as mock_open:
+            self.win.ad_banner.cta_button.click()
+            mock_open.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

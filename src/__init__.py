@@ -1,4 +1,5 @@
-from .styles import DARK_STYLESHEET
+from .styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_theme_stylesheet
+from .ads import AdBannerWidget, AdFeedWorker, DEFAULT_ADS
 from .utils import (
     format_bytes,
     sanitize_filename,
@@ -35,6 +36,11 @@ from .main_window import MainWindow
 
 __all__ = [
     "DARK_STYLESHEET",
+    "LIGHT_STYLESHEET",
+    "get_theme_stylesheet",
+    "AdBannerWidget",
+    "AdFeedWorker",
+    "DEFAULT_ADS",
     "format_bytes",
     "sanitize_filename",
     "extract_folder_name_from_url",

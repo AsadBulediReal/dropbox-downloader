@@ -18,7 +18,7 @@ from dropbox.oauth import DropboxOAuth2FlowNoRedirect
 from dropbox.exceptions import ApiError, AuthError
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QSettings, QTimer
-from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QFont, QTextCursor, QCursor, QColor, QKeyEvent, QMouseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QCheckBox,
     QScrollArea,
+    QStackedWidget,
+    QSizePolicy,
     QTreeWidget,
     QTreeWidgetItem,
     QTreeWidgetItemIterator,
@@ -45,7 +47,8 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
-from .styles import DARK_STYLESHEET
+from .styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_theme_stylesheet
+from .ads import AdBannerWidget
 from .utils import (
     format_bytes,
     sanitize_filename,
@@ -80,16 +83,47 @@ from .dialogs import (
 )
 
 
+class _ClickBackdrop(QFrame):
+    """Semi-transparent click-catcher backdrop for the slide-over Settings drawer."""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setStyleSheet("background-color: rgba(15, 23, 42, 125); border: none;")
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
+    _RE_START_FILE = re.compile(
+        r"^(?:GET\s+|🔄 RESUME |🔄 RESTART |🔄 REPAIRING )\[(.*?)\] (.*?)(?:\s+\(|\:\s+)"
+    )
+    _RE_DONE_FILE = re.compile(r"^DONE\s+\[(.*?)\] (.*)$")
+    _RE_SKIP_FILE = re.compile(r"^SKIP\s+\[(.*?)\] (.*?) \(already exists\)$")
+    _RE_VERIFIED_FILE = re.compile(r"^✓ VERIFIED \[(.*?)\] (.*?)(?:\s+\[Hash:.*)?$")
+    _RE_QUEUE_FILE = re.compile(r"^⏳ QUEUE \[(.*?)\] (.*?):")
+    _RE_REQUEUED_ONLY = re.compile(r"^⏳ REQUEUED \[(.*?)\]")
+    _RE_ERROR_FILE = re.compile(
+        r"^(?:❌ ERROR|🔒 ERROR|❌ CORRUPTED|❌ MISSING|❌ UNREADABLE) \[(.*?)\] (.*?):"
+    )
+
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Dropbox Recursive Downloader Pro")
-        self.resize(940, 860)
-        self.setMinimumSize(840, 700)
-        self.setStyleSheet(DARK_STYLESHEET)
+        self.setWindowTitle("Dropbox Downloader")
+        self.resize(980, 780)
+        self.setMinimumSize(820, 640)
 
         self.settings = QSettings("DropboxDownloader", "RecursiveGUI")
+        self.theme_mode: str = "light"
+
         self._active_workers: dict[QThread, QObject] = {}
         self.download_thread: QThread | None = None
         self.worker: DownloadWorker | None = None
@@ -101,6 +135,7 @@ class MainWindow(QMainWindow):
         self.verify_worker: SessionVerifyWorker | None = None
         self._updating_tree = False
         self._tree_items_data: list[Any] = []
+        self._scanned_url: str = ""
 
         self.current_access_token: str = ""
         self.current_refresh_token: str = ""
@@ -111,6 +146,15 @@ class MainWindow(QMainWindow):
         self.is_download_paused: bool = False
         self._is_running: bool = False
         self.current_root_name: str = ""
+        self.current_step: int = 0
+
+        # Live Queue & Downloaded/Remaining State
+        self.queue_filter_mode: str = "all"  # "all" | "done" | "rem"
+        self._queue_records: dict[str, dict[str, Any]] = {}
+        self._queue_tree_items: dict[str, QTreeWidgetItem] = {}
+        self._active_queue_key: str = ""
+        self._total_batch_files: int = 0
+        self._total_batch_bytes: int = 0
 
         self.auto_scan_timer = QTimer(self)
         self.auto_scan_timer.setSingleShot(True)
@@ -121,134 +165,233 @@ class MainWindow(QMainWindow):
         self.realtime_stats_timer.timeout.connect(self.tick_realtime_stats)
 
         self.setup_ui()
-
         self.load_settings()
 
+    # ==========================================================================
+    # Theme & Top-Level Badges
+    # ==========================================================================
+    def _repolish(self, widget: QWidget | None):
+        if widget is None:
+            return
+        st = widget.style()
+        if st is not None:
+            st.unpolish(widget)
+            st.polish(widget)
+        widget.update()
+
+    def apply_theme(self, mode: str, save: bool = True):
+        self.theme_mode = "dark" if str(mode).strip().lower() == "dark" else "light"
+        self.setStyleSheet(get_theme_stylesheet(self.theme_mode))
+        if hasattr(self, "btn_theme_toggle"):
+            if self.theme_mode == "light":
+                self.btn_theme_toggle.setText("🌙  Switch to Minimal Dark Mode")
+            else:
+                self.btn_theme_toggle.setText("☀️  Switch to Clean Light Mode")
+
+        # Re-apply dynamic badges & colors
+        self.set_auth_badge(
+            self.auth_badge.text() or ("● Connected" if self.is_logged_in() else "○ Not Logged In"),
+            "connected" if self.is_logged_in() else "neutral",
+        )
+        self.set_status_badge(
+            self.status_badge.text() or "● Ready",
+            getattr(self, "_last_status_state", "ready"),
+        )
+        self._refresh_all_queue_item_styles()
+        if save:
+            self.settings.setValue("theme_mode", self.theme_mode)
+
+    def toggle_theme(self):
+        next_mode = "dark" if self.theme_mode == "light" else "light"
+        self.apply_theme(next_mode, save=True)
+
     def set_status_badge(self, text: str, state: str = "ready"):
-        styles = {
-            "ready": "background-color: #1e293b; color: #38bdf8; border: 1px solid #334155;",
-            "running": "background-color: #0c2e59; color: #60a5fa; border: 1px solid #1d4ed8;",
-            "verifying": "background-color: #2e1065; color: #c084fc; border: 1px solid #7e22ce;",
-            "success": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
-            "warning": "background-color: #451a03; color: #fbbf24; border: 1px solid #d97706;",
-            "error": "background-color: #450a0a; color: #f87171; border: 1px solid #b91c1c;",
-            "neutral": "background-color: #1e293b; color: #94a3b8; border: 1px solid #334155;",
-        }
+        self._last_status_state = state
+        is_light = self.theme_mode == "light"
+        if is_light:
+            styles = {
+                "ready": "background-color: #f0f9ff; color: #0284c7; border: 1px solid #bae6fd;",
+                "running": "background-color: #eff6ff; color: #0061ff; border: 1px solid #93c5fd;",
+                "verifying": "background-color: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe;",
+                "success": "background-color: #ecfdf5; color: #059669; border: 1px solid #a7f3d0;",
+                "warning": "background-color: #fffbeb; color: #d97706; border: 1px solid #fde68a;",
+                "error": "background-color: #fef2f2; color: #dc2626; border: 1px solid #fecaca;",
+                "neutral": "background-color: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1;",
+            }
+        else:
+            styles = {
+                "ready": "background-color: #1e293b; color: #38bdf8; border: 1px solid #334155;",
+                "running": "background-color: #0c2e59; color: #60a5fa; border: 1px solid #1d4ed8;",
+                "verifying": "background-color: #2e1065; color: #c084fc; border: 1px solid #7e22ce;",
+                "success": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
+                "warning": "background-color: #451a03; color: #fbbf24; border: 1px solid #d97706;",
+                "error": "background-color: #450a0a; color: #f87171; border: 1px solid #b91c1c;",
+                "neutral": "background-color: #1e293b; color: #94a3b8; border: 1px solid #334155;",
+            }
         style_str = styles.get(state, styles["ready"])
         self.status_badge.setText(text)
         self.status_badge.setStyleSheet(
-            f"{style_str} border-radius: 12px; padding: 4px 14px; font-weight: 600; font-size: 11px;"
+            f"{style_str} border-radius: 11px; padding: 3px 11px; font-weight: 600; font-size: 11px;"
         )
 
     def set_auth_badge(self, text: str, state: str = "neutral"):
-        styles = {
-            "connected": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
-            "neutral": "background-color: #1e293b; color: #94a3b8; border: 1px solid #334155;",
-        }
+        is_light = self.theme_mode == "light"
+        if is_light:
+            styles = {
+                "connected": "background-color: #ecfdf5; color: #059669; border: 1px solid #a7f3d0;",
+                "neutral": "background-color: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1;",
+            }
+        else:
+            styles = {
+                "connected": "background-color: #064e3b; color: #34d399; border: 1px solid #059669;",
+                "neutral": "background-color: #1e293b; color: #94a3b8; border: 1px solid #334155;",
+            }
         style_str = styles.get(state, styles["neutral"])
         self.auth_badge.setText(text)
         self.auth_badge.setStyleSheet(
-            f"{style_str} border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 600;"
+            f"{style_str} border-radius: 11px; padding: 3px 10px; font-size: 11px; font-weight: 600;"
         )
 
     def set_selection_summary(self, text: str, state: str = "neutral"):
-        colors = {
-            "neutral": "#94a3b8",
-            "active": "#38bdf8",
-            "success": "#10b981",
-            "error": "#f87171",
-        }
-        col = colors.get(state, "#94a3b8")
+        is_light = self.theme_mode == "light"
+        if is_light:
+            colors = {
+                "neutral": ("#f1f5f9", "#64748b"),
+                "active": ("#eff6ff", "#0061ff"),
+                "success": ("#ecfdf5", "#059669"),
+                "error": ("#fef2f2", "#dc2626"),
+            }
+        else:
+            colors = {
+                "neutral": ("#0b1120", "#94a3b8"),
+                "active": ("#0c2e59", "#38bdf8"),
+                "success": ("#064e3b", "#34d399"),
+                "error": ("#450a0a", "#f87171"),
+            }
+        bg, fg = colors.get(state, colors["neutral"])
         self.selection_summary_label.setText(text)
-        self.selection_summary_label.setStyleSheet(f"font-size: 11px; color: {col}; font-weight: 600;")
+        self.selection_summary_label.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 600;"
+        )
 
+    # ==========================================================================
+    # UI Construction (3-Step Guided Wizard + Queue Tabs + Bottom Ad + Settings)
+    # ==========================================================================
     def setup_ui(self):
-        main_widget = QWidget()
-        main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        root_widget = QWidget()
+        root_layout = QVBoxLayout(root_widget)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        # Header Section (Brand + Account + Status)
+        # ----------------------------------------------------------------------
+        # TOP HEADER BAR: Brand (Left) + 3-Step Pills (Center) + Settings (Right)
+        # ----------------------------------------------------------------------
         header_card = QFrame()
         header_card.setProperty("class", "header-card")
         header_layout = QHBoxLayout(header_card)
-        header_layout.setContentsMargins(14, 10, 14, 10)
-        header_layout.setSpacing(10)
+        header_layout.setContentsMargins(22, 12, 22, 12)
+        header_layout.setSpacing(12)
 
-        header_text_layout = QVBoxLayout()
-        header_text_layout.setSpacing(2)
-
-        title_row = QHBoxLayout()
-        title_row.setSpacing(8)
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(8)
         brand_icon = QLabel("📦")
-        brand_icon.setStyleSheet("font-size: 20px;")
-        title_label = QLabel("Dropbox Recursive Downloader Pro")
-        title_font = QFont("Segoe UI", 15, QFont.Weight.Bold)
-        title_label.setFont(title_font)
-        title_label.setStyleSheet("color: #38bdf8; font-weight: 700;")
-        title_row.addWidget(brand_icon)
-        title_row.addWidget(title_label)
-        title_row.addStretch()
+        brand_icon.setFixedSize(32, 32)
+        brand_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand_icon.setStyleSheet(
+            "background-color: #0061ff; color: #ffffff; border-radius: 9px; font-size: 16px; font-weight: bold;"
+        )
+        brand_row.addWidget(brand_icon)
 
-        subtitle_label = QLabel("Selectively download files and folder hierarchies directly from Dropbox shared links")
-        subtitle_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        subtitle_label.setWordWrap(True)
-
-        header_text_layout.addLayout(title_row)
-        header_text_layout.addWidget(subtitle_label)
-        header_layout.addLayout(header_text_layout)
-
-        header_layout.addStretch()
-
-        # Account Pill
-        account_pill = QFrame()
-        account_pill.setProperty("class", "account-pill")
-        account_pill_layout = QHBoxLayout(account_pill)
-        account_pill_layout.setContentsMargins(10, 5, 10, 5)
-        account_pill_layout.setSpacing(8)
-
-        self.account_info_layout = QVBoxLayout()
-        self.account_info_layout.setSpacing(1)
-        self.account_name_label = QLabel("No Dropbox account connected")
-        self.account_name_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #f8fafc;")
-        self.account_sub_label = QLabel("Sign in to your Dropbox account")
-        self.account_sub_label.setStyleSheet("font-size: 10px; color: #94a3b8;")
-        self.account_info_layout.addWidget(self.account_name_label)
-        self.account_info_layout.addWidget(self.account_sub_label)
-        account_pill_layout.addLayout(self.account_info_layout)
+        title_label = QLabel("Dropbox Downloader")
+        title_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        title_label.setStyleSheet("background-color: transparent; font-weight: 700;")
+        brand_row.addWidget(title_label)
 
         self.auth_badge = QLabel()
-        self.set_auth_badge("○ Not Logged In", "neutral")
-        account_pill_layout.addWidget(self.auth_badge)
-
-        self.btn_oauth_login = QPushButton("🌐  Log In")
-        self.btn_oauth_login.setProperty("class", "btn-primary")
-        self.btn_oauth_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_oauth_login.setToolTip("Sign into your Dropbox account via browser (PKCE OAuth)")
-        self.btn_oauth_login.clicked.connect(self.login_with_dropbox)
-        account_pill_layout.addWidget(self.btn_oauth_login)
-
-        self.btn_logout = QPushButton("Sign Out")
-        self.btn_logout.setProperty("class", "btn-secondary")
-        self.btn_logout.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_logout.setToolTip("Sign out of current Dropbox account")
-        self.btn_logout.clicked.connect(self.logout_dropbox)
-        self.btn_logout.setVisible(False)
-        account_pill_layout.addWidget(self.btn_logout)
-
-        header_layout.addWidget(account_pill)
+        brand_row.addWidget(self.auth_badge)
 
         self.status_badge = QLabel()
-        self.set_status_badge("● Ready", "ready")
-        header_layout.addWidget(self.status_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
+        brand_row.addWidget(self.status_badge)
 
-        main_layout.addWidget(header_card)
+        self.btn_header_login = QPushButton("🌐 Log In")
+        self.btn_header_login.setProperty("class", "btn-primary")
+        self.btn_header_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_header_login.clicked.connect(self.login_with_dropbox)
+        brand_row.addWidget(self.btn_header_login)
 
-        # Authentication Required Banner (shown when user is not logged in)
+        header_layout.addLayout(brand_row)
+        header_layout.addStretch(1)
+
+        # Center 3-Step Guided Wizard Pill Bar
+        self.wizard_pill_bar = QFrame()
+        self.wizard_pill_bar.setProperty("class", "wizard-pill-bar")
+        pill_layout = QHBoxLayout(self.wizard_pill_bar)
+        pill_layout.setContentsMargins(4, 4, 4, 4)
+        pill_layout.setSpacing(4)
+
+        self.btn_step_1 = QPushButton("1. Link & Recent")
+        self.btn_step_1.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_step_1.clicked.connect(lambda: self.go_to_step(0))
+
+        self.btn_step_2 = QPushButton("2. Select Files")
+        self.btn_step_2.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_step_2.clicked.connect(lambda: self.go_to_step(1))
+
+        self.btn_step_3 = QPushButton("3. Transfers")
+        self.btn_step_3.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_step_3.clicked.connect(lambda: self.go_to_step(2))
+
+        pill_layout.addWidget(self.btn_step_1)
+        pill_layout.addWidget(self.btn_step_2)
+        pill_layout.addWidget(self.btn_step_3)
+        header_layout.addWidget(self.wizard_pill_bar)
+
+        header_layout.addStretch(1)
+
+        # Corner Settings Button
+        self.btn_settings = QPushButton("⚙️  Settings")
+        self.btn_settings.setProperty("class", "btn-settings")
+        self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_settings.setToolTip("Open download folder, integrity rules, account, theme, and activity log")
+        self.btn_settings.clicked.connect(self.toggle_settings_drawer)
+        header_layout.addWidget(self.btn_settings)
+
+        root_layout.addWidget(header_card)
+
+        # ----------------------------------------------------------------------
+        # MAIN SCROLLABLE WORKSPACE + WIZARD STACK
+        # ----------------------------------------------------------------------
+        workspace_scroll = QScrollArea()
+        workspace_scroll.setWidgetResizable(True)
+        workspace_scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        workspace_container = QWidget()
+        workspace_layout = QVBoxLayout(workspace_container)
+        workspace_layout.setContentsMargins(24, 20, 24, 10)
+        workspace_layout.setSpacing(14)
+
+        self.wizard_stack = QStackedWidget()
+        self.wizard_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        # ==================== STEP 1: PASTE LINK & RECENT ====================
+        step1_page = QWidget()
+        step1_outer = QHBoxLayout(step1_page)
+        step1_outer.setContentsMargins(0, 0, 0, 0)
+        step1_outer.addStretch(1)
+
+        step1_col = QWidget()
+        step1_col.setMaximumWidth(780)
+        step1_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        step1_layout = QVBoxLayout(step1_col)
+        step1_layout.setContentsMargins(0, 12, 0, 12)
+        step1_layout.setSpacing(18)
+        step1_layout.addStretch(1)
+
+        # Login Required Banner (shown when signed out)
         self.login_banner = QFrame()
         self.login_banner.setProperty("class", "login-banner")
         banner_layout = QHBoxLayout(self.login_banner)
-        banner_layout.setContentsMargins(14, 10, 14, 10)
+        banner_layout.setContentsMargins(16, 12, 16, 12)
         banner_layout.setSpacing(12)
 
         banner_icon = QLabel("🔒")
@@ -258,172 +401,185 @@ class MainWindow(QMainWindow):
         banner_text_layout = QVBoxLayout()
         banner_text_layout.setSpacing(2)
         banner_title = QLabel("Dropbox Sign-In Required")
-        banner_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #f8fafc; background-color: transparent;")
+        banner_title.setStyleSheet("font-size: 13px; font-weight: 700; background-color: transparent;")
         banner_desc = QLabel(
-            "Features are locked. Please sign in to your Dropbox account to enable folder scanning and downloads."
+            "Sign in with your Dropbox account to unlock folder scanning and selective downloads."
         )
-        banner_desc.setStyleSheet("font-size: 11px; color: #94a3b8; background-color: transparent;")
+        banner_desc.setWordWrap(True)
+        banner_desc.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
         banner_text_layout.addWidget(banner_title)
         banner_text_layout.addWidget(banner_desc)
-        banner_layout.addLayout(banner_text_layout)
-        banner_layout.addStretch()
+        banner_layout.addLayout(banner_text_layout, 1)
 
         self.btn_banner_login = QPushButton("🌐  Log In to Dropbox")
         self.btn_banner_login.setProperty("class", "btn-primary")
-        self.btn_banner_login.setFixedHeight(34)
+        self.btn_banner_login.setFixedHeight(36)
         self.btn_banner_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_banner_login.clicked.connect(self.login_with_dropbox)
         banner_layout.addWidget(self.btn_banner_login)
+        step1_layout.addWidget(self.login_banner)
 
-        main_layout.addWidget(self.login_banner)
+        # Centered Hero Title
+        hero_box = QVBoxLayout()
+        hero_box.setSpacing(6)
+        hero_title = QLabel("Paste Dropbox Shared Link")
+        hero_title.setProperty("class", "hero-title")
+        hero_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_subtitle = QLabel("Enter any shared folder or file link, or reload a recent folder in one click.")
+        hero_subtitle.setProperty("class", "hero-subtitle")
+        hero_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_subtitle.setWordWrap(True)
+        hero_box.addWidget(hero_title)
+        hero_box.addWidget(hero_subtitle)
+        step1_layout.addLayout(hero_box)
 
-        # 1. Source & Local Destination Card
+        # Unified URL Command Card
         self.target_card = QFrame()
-        self.target_card.setProperty("class", "card")
-        target_layout = QVBoxLayout(self.target_card)
-        target_layout.setContentsMargins(16, 14, 16, 14)
-        target_layout.setSpacing(10)
-
-        target_title = QLabel("1. Source & Local Destination")
-        target_title.setProperty("class", "section-title")
-        target_layout.addWidget(target_title)
-
-        url_label = QLabel("Dropbox Shared Link:")
-        url_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1;")
-        target_layout.addWidget(url_label)
-
-        url_row = QHBoxLayout()
-        url_row.setSpacing(6)
+        self.target_card.setProperty("class", "url-command-card")
+        target_layout = QHBoxLayout(self.target_card)
+        target_layout.setContentsMargins(10, 8, 10, 8)
+        target_layout.setSpacing(8)
 
         self.url_input = QLineEdit()
+        self.url_input.setProperty("class", "command-input")
         self.url_input.setPlaceholderText("https://www.dropbox.com/scl/fo/... or https://www.dropbox.com/sh/...")
         self.url_input.textChanged.connect(self.on_url_text_changed)
         self.url_input.returnPressed.connect(self.start_scan)
 
-        self.btn_recent_links = QPushButton("🕒 Recent ▼")
-        self.btn_recent_links.setToolTip("Select from previously saved Dropbox links")
-        self.btn_recent_links.clicked.connect(self.show_recent_links_menu)
-
-        self.btn_paste_url = QPushButton("📋 Paste")
-        self.btn_paste_url.setToolTip("Paste link from clipboard and scan")
-        self.btn_paste_url.clicked.connect(self.paste_url)
-
         self.btn_clear_url = QPushButton("✕ Clear")
+        self.btn_clear_url.setProperty("class", "btn-secondary")
+        self.btn_clear_url.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_clear_url.setToolTip("Clear link and file list")
         self.btn_clear_url.clicked.connect(self.clear_url_and_tree)
 
-        self.btn_scan_url = QPushButton("🔍 Load Folders")
+        self.btn_paste_url = QPushButton("📋 Paste")
+        self.btn_paste_url.setProperty("class", "btn-secondary")
+        self.btn_paste_url.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_paste_url.setToolTip("Paste link from clipboard and scan")
+        self.btn_paste_url.clicked.connect(self.paste_url)
+
+        self.btn_scan_url = QPushButton("Load Folders →")
         self.btn_scan_url.setProperty("class", "btn-primary")
-        self.btn_scan_url.setToolTip("Inspect shared folder and display files below (Enter)")
+        self.btn_scan_url.setMinimumHeight(38)
+        self.btn_scan_url.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_scan_url.setToolTip("Inspect shared folder and select files (Enter)")
         self.btn_scan_url.clicked.connect(self.start_scan)
 
-        url_row.addWidget(self.url_input, 1)
-        url_row.addWidget(self.btn_recent_links)
-        url_row.addWidget(self.btn_paste_url)
-        url_row.addWidget(self.btn_clear_url)
-        url_row.addWidget(self.btn_scan_url)
-        target_layout.addLayout(url_row)
+        target_layout.addWidget(self.url_input, 1)
+        target_layout.addWidget(self.btn_clear_url)
+        target_layout.addWidget(self.btn_paste_url)
+        target_layout.addWidget(self.btn_scan_url)
+        step1_layout.addWidget(self.target_card)
 
-        # Quick Recent Links Chips Row
+        # Recent Links Card (Quick Chips + Detailed Recent Rows)
+        self.recent_card = QFrame()
+        self.recent_card.setProperty("class", "card")
+        recent_card_layout = QVBoxLayout(self.recent_card)
+        recent_card_layout.setContentsMargins(18, 14, 18, 14)
+        recent_card_layout.setSpacing(10)
+
+        recent_header = QHBoxLayout()
+        recent_title = QLabel("🕒 RECENT LINKS")
+        recent_title.setProperty("class", "section-title")
+        recent_header.addWidget(recent_title)
+        recent_header.addStretch()
+
+        self.btn_recent_links = QPushButton("All History ▼")
+        self.btn_recent_links.setProperty("class", "btn-secondary")
+        self.btn_recent_links.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_recent_links.setToolTip("Open full recent links menu or clear history")
+        self.btn_recent_links.clicked.connect(self.show_recent_links_menu)
+        recent_header.addWidget(self.btn_recent_links)
+        recent_card_layout.addLayout(recent_header)
+
         self.recent_chips_container = QWidget()
         self.recent_chips_layout = QHBoxLayout(self.recent_chips_container)
         self.recent_chips_layout.setContentsMargins(0, 0, 0, 0)
         self.recent_chips_layout.setSpacing(6)
         self.recent_chips_container.setVisible(False)
-        target_layout.addWidget(self.recent_chips_container)
+        recent_card_layout.addWidget(self.recent_chips_container)
 
-        dest_label = QLabel("Save Downloaded Files To:")
-        dest_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #cbd5e1; margin-top: 4px;")
-        target_layout.addWidget(dest_label)
+        self.recent_rows_container = QWidget()
+        self.recent_rows_layout = QVBoxLayout(self.recent_rows_container)
+        self.recent_rows_layout.setContentsMargins(0, 2, 0, 0)
+        self.recent_rows_layout.setSpacing(6)
+        recent_card_layout.addWidget(self.recent_rows_container)
 
-        dest_row = QHBoxLayout()
-        dest_row.setSpacing(6)
-        self.destination_input = QLineEdit()
-        self.destination_input.setText(str(Path.home() / "Downloads"))
-        self.destination_input.setPlaceholderText("Select local folder to save files...")
-        self.destination_input.setToolTip(
-            "Target folder for downloads.\n"
-            "If the selected folder has the same name as the Dropbox folder, "
-            "files will download directly into it without creating an extra root folder."
-        )
+        step1_layout.addWidget(self.recent_card)
+        step1_layout.addStretch(2)
 
-        self.btn_browse = QPushButton("📁 Browse...")
-        self.btn_browse.setFixedWidth(105)
-        self.btn_browse.clicked.connect(self.browse_destination)
+        step1_outer.addWidget(step1_col, 1)
+        step1_outer.addStretch(1)
+        self.wizard_stack.addWidget(step1_page)
 
-        self.btn_open_folder = QPushButton("📂 Open Folder")
-        self.btn_open_folder.setFixedWidth(120)
-        self.btn_open_folder.clicked.connect(self.open_destination_folder)
+        # ==================== STEP 2: SELECT FILES ====================
+        step2_page = QWidget()
+        step2_outer = QHBoxLayout(step2_page)
+        step2_outer.setContentsMargins(0, 0, 0, 0)
+        step2_outer.addStretch(1)
 
-        dest_row.addWidget(self.destination_input, 1)
-        dest_row.addWidget(self.btn_browse)
-        dest_row.addWidget(self.btn_open_folder)
-        target_layout.addLayout(dest_row)
+        step2_col = QWidget()
+        step2_col.setMaximumWidth(920)
+        step2_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        step2_layout = QVBoxLayout(step2_col)
+        step2_layout.setContentsMargins(0, 4, 0, 4)
+        step2_layout.setSpacing(12)
 
-        dest_opts_row = QHBoxLayout()
-        dest_opts_row.setSpacing(14)
-        self.check_skip_existing = QCheckBox("Skip files that already exist locally (matching exact size)")
-        self.check_skip_existing.setChecked(True)
-        self.check_skip_existing.setToolTip("Skip files that already exist on disk with the exact matching size.")
-        self.check_skip_existing.stateChanged.connect(lambda: self.save_settings())
-        dest_opts_row.addWidget(self.check_skip_existing)
+        # Top Toolbar Row
+        step2_top_bar = QHBoxLayout()
+        step2_top_bar.setSpacing(8)
 
-        self.check_verify_integrity = QCheckBox("Verify file integrity after download (Dropbox checksum)")
-        self.check_verify_integrity.setChecked(True)
-        self.check_verify_integrity.setToolTip("Compute SHA-256 block hash of files and verify against Dropbox cloud checksum to guarantee 0% corruption.")
-        self.check_verify_integrity.stateChanged.connect(lambda: self.save_settings())
-        dest_opts_row.addWidget(self.check_verify_integrity)
+        self.btn_back_to_link = QPushButton("← Change Link")
+        self.btn_back_to_link.setProperty("class", "btn-secondary")
+        self.btn_back_to_link.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_back_to_link.clicked.connect(lambda: self.go_to_step(0))
+        step2_top_bar.addWidget(self.btn_back_to_link)
 
-        self.check_auto_repair = QCheckBox("Auto re-download if file is corrupted")
-        self.check_auto_repair.setChecked(True)
-        self.check_auto_repair.setToolTip("Automatically delete and re-download any file that fails integrity check or has checksum mismatch.")
-        self.check_auto_repair.stateChanged.connect(lambda: self.save_settings())
-        dest_opts_row.addWidget(self.check_auto_repair)
+        self.step2_folder_label = QLabel("📂 Shared Folder")
+        self.step2_folder_label.setStyleSheet("font-size: 13px; font-weight: 700; background-color: transparent;")
+        step2_top_bar.addWidget(self.step2_folder_label)
 
-        dest_opts_row.addStretch()
-        target_layout.addLayout(dest_opts_row)
+        self.selection_summary_label = QLabel("(Paste link in Step 1 to inspect folders)")
+        self.set_selection_summary("(Paste link in Step 1 to inspect folders)", "neutral")
+        step2_top_bar.addWidget(self.selection_summary_label)
 
-        main_layout.addWidget(self.target_card)
+        step2_top_bar.addStretch()
 
-        # 2. Tree Selection Card
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_select_all.clicked.connect(self.select_all_items)
+
+        self.btn_deselect_all = QPushButton("Deselect All")
+        self.btn_deselect_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_deselect_all.clicked.connect(self.deselect_all_items)
+
+        self.btn_expand_all = QPushButton("Expand All")
+        self.btn_expand_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_expand_all.clicked.connect(lambda: self.tree_widget.expandAll())
+
+        self.btn_collapse_all = QPushButton("Collapse All")
+        self.btn_collapse_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_collapse_all.clicked.connect(lambda: self.tree_widget.collapseAll())
+
+        step2_top_bar.addWidget(self.btn_select_all)
+        step2_top_bar.addWidget(self.btn_deselect_all)
+        step2_top_bar.addWidget(self.btn_expand_all)
+        step2_top_bar.addWidget(self.btn_collapse_all)
+        step2_layout.addLayout(step2_top_bar)
+
+        # Spacious Tree Card
         self.tree_card = QFrame()
         self.tree_card.setProperty("class", "card")
         tree_layout = QVBoxLayout(self.tree_card)
         tree_layout.setContentsMargins(16, 14, 16, 14)
         tree_layout.setSpacing(8)
 
-        tree_header = QHBoxLayout()
-        tree_title = QLabel("2. Folder & File Selection")
-        tree_title.setProperty("class", "section-title")
-        tree_header.addWidget(tree_title)
-
-        self.selection_summary_label = QLabel("(Paste link above to inspect folders)")
-        self.selection_summary_label.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 500;")
-        tree_header.addWidget(self.selection_summary_label)
-
-        tree_header.addStretch()
-
-        self.btn_select_all = QPushButton("Select All")
-        self.btn_select_all.clicked.connect(self.select_all_items)
-        self.btn_deselect_all = QPushButton("Deselect All")
-        self.btn_deselect_all.clicked.connect(self.deselect_all_items)
-        self.btn_expand_all = QPushButton("Expand All")
-        self.btn_expand_all.clicked.connect(lambda: self.tree_widget.expandAll())
-        self.btn_collapse_all = QPushButton("Collapse All")
-        self.btn_collapse_all.clicked.connect(lambda: self.tree_widget.collapseAll())
-
-        tree_header.addWidget(self.btn_select_all)
-        tree_header.addWidget(self.btn_deselect_all)
-        tree_header.addWidget(self.btn_expand_all)
-        tree_header.addWidget(self.btn_collapse_all)
-        tree_layout.addLayout(tree_header)
-
         self.tree_widget = FileTreeWidget()
-        self.tree_widget.setHeaderLabels(["Name", "Type", "Size"])
+        self.tree_widget.setHeaderLabels(["Folder / File Name", "Type", "Size"])
         self.tree_widget.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree_widget.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree_widget.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.tree_widget.setMinimumHeight(240)
+        self.tree_widget.setMinimumHeight(290)
         self.tree_widget.setAnimated(True)
         self.tree_widget.setExpandsOnDoubleClick(True)
         self.tree_widget.itemChanged.connect(self.on_tree_item_changed)
@@ -435,202 +591,947 @@ class MainWindow(QMainWindow):
         self.tree_widget.currentItemChanged.connect(self.on_tree_current_item_changed)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.show_tree_context_menu)
-        tree_layout.addWidget(self.tree_widget)
-        self.show_empty_tree_placeholder()
+        tree_layout.addWidget(self.tree_widget, 1)
 
-        self.tree_hint = QLabel("💡 Tip: Click or check files to select for download. Shift+Click to select a range. Space to toggle. Right-click for options.")
-        self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        self.tree_hint = QLabel(
+            "💡 Tip: Check files/folders to download. Shift+Click for range select. Space to toggle. Right-click for options."
+        )
+        self.tree_hint.setStyleSheet("font-size: 11px; color: #64748b; background-color: transparent;")
         tree_layout.addWidget(self.tree_hint)
+        step2_layout.addWidget(self.tree_card, 1)
 
-        main_layout.addWidget(self.tree_card)
+        # Bottom Action Footer
+        step2_footer = QHBoxLayout()
+        step2_footer.setSpacing(10)
 
-        # 3. Progress & Status Card
-        self.progress_card = QFrame()
-        self.progress_card.setProperty("class", "card")
-        progress_layout = QVBoxLayout(self.progress_card)
-        progress_layout.setContentsMargins(16, 14, 16, 14)
-        progress_layout.setSpacing(10)
+        self.dest_summary_label = QLabel()
+        self.dest_summary_label.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
+        step2_footer.addWidget(self.dest_summary_label)
 
-        prog_title = QLabel("3. Download Status & Progress")
-        prog_title.setProperty("class", "section-title")
-        progress_layout.addWidget(prog_title)
+        self.btn_change_dest = QPushButton("Change in ⚙️ Settings")
+        self.btn_change_dest.setProperty("class", "ad-cta")
+        self.btn_change_dest.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_change_dest.clicked.connect(self.open_settings_drawer)
+        step2_footer.addWidget(self.btn_change_dest)
 
-        # Current File Progress Row
+        step2_footer.addStretch()
+
+        self.btn_verify_files = QPushButton("🔍  Verify Existing")
+        self.btn_verify_files.setProperty("class", "btn-secondary")
+        self.btn_verify_files.setEnabled(False)
+        self.btn_verify_files.setMinimumHeight(40)
+        self.btn_verify_files.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_verify_files.setToolTip(
+            "Verify existing downloaded files against Dropbox cloud checksums without re-downloading intact files."
+        )
+        self.btn_verify_files.clicked.connect(self.start_verification_only)
+
+        self.start_button = QPushButton("📋  Paste Link & Select Files to Start")
+        self.start_button.setProperty("class", "btn-start")
+        self.start_button.setEnabled(False)
+        self.start_button.setMinimumHeight(40)
+        self.start_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.start_button.clicked.connect(self.start_download)
+
+        self.btn_view_active_transfer = QPushButton("View Active Transfer →")
+        self.btn_view_active_transfer.setProperty("class", "btn-primary")
+        self.btn_view_active_transfer.setMinimumHeight(40)
+        self.btn_view_active_transfer.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_view_active_transfer.setVisible(False)
+        self.btn_view_active_transfer.clicked.connect(lambda: self.go_to_step(2))
+
+        step2_footer.addWidget(self.btn_verify_files)
+        step2_footer.addWidget(self.start_button)
+        step2_footer.addWidget(self.btn_view_active_transfer)
+        step2_layout.addLayout(step2_footer)
+
+        step2_outer.addWidget(step2_col, 1)
+        step2_outer.addStretch(1)
+        self.wizard_stack.addWidget(step2_page)
+
+        # ==================== STEP 3: TRANSFERS & QUEUE TABS ====================
+        step3_page = QWidget()
+        step3_outer = QHBoxLayout(step3_page)
+        step3_outer.setContentsMargins(0, 0, 0, 0)
+        step3_outer.addStretch(1)
+
+        self.progress_card = QWidget()
+        self.progress_card.setMaximumWidth(920)
+        self.progress_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        step3_layout = QVBoxLayout(self.progress_card)
+        step3_layout.setContentsMargins(0, 4, 0, 4)
+        step3_layout.setSpacing(12)
+
+        # Row 1: Design 3's 3 Bold Summary Stat Cards (Downloaded / Remaining / Speed & Time)
+        stats_row = QGridLayout()
+        stats_row.setSpacing(12)
+
+        # Card A: Downloaded
+        card_done = QFrame()
+        card_done.setProperty("class", "stat-card")
+        done_h = QHBoxLayout(card_done)
+        done_h.setContentsMargins(16, 12, 16, 12)
+        done_v = QVBoxLayout()
+        done_v.setSpacing(2)
+        lbl_done_title = QLabel("✓ Downloaded")
+        lbl_done_title.setProperty("class", "metric-title")
+        self.val_files = QLabel("0 files")
+        self.val_files.setStyleSheet(
+            "font-size: 19px; font-weight: 700; color: #10b981; background-color: transparent;"
+        )
+        self.val_data = QLabel("0 B saved to disk")
+        self.val_data.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
+        done_v.addWidget(lbl_done_title)
+        done_v.addWidget(self.val_files)
+        done_v.addWidget(self.val_data)
+        done_icon = QLabel("✅")
+        done_icon.setStyleSheet("font-size: 22px; background-color: transparent;")
+        done_h.addLayout(done_v, 1)
+        done_h.addWidget(done_icon)
+        stats_row.addWidget(card_done, 0, 0)
+
+        # Card B: Remaining
+        card_rem = QFrame()
+        card_rem.setProperty("class", "stat-card")
+        rem_h = QHBoxLayout(card_rem)
+        rem_h.setContentsMargins(16, 12, 16, 12)
+        rem_v = QVBoxLayout()
+        rem_v.setSpacing(2)
+        lbl_rem_title = QLabel("⏳ Remaining")
+        lbl_rem_title.setProperty("class", "metric-title")
+        self.val_remaining_files = QLabel("0 files left")
+        self.val_remaining_files.setStyleSheet(
+            "font-size: 19px; font-weight: 700; color: #f59e0b; background-color: transparent;"
+        )
+        self.val_remaining_bytes = QLabel("0 B remaining")
+        self.val_remaining_bytes.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
+        rem_v.addWidget(lbl_rem_title)
+        rem_v.addWidget(self.val_remaining_files)
+        rem_v.addWidget(self.val_remaining_bytes)
+        rem_icon = QLabel("⏳")
+        rem_icon.setStyleSheet("font-size: 22px; background-color: transparent;")
+        rem_h.addLayout(rem_v, 1)
+        rem_h.addWidget(rem_icon)
+        stats_row.addWidget(card_rem, 0, 1)
+
+        # Card C: Speed & Time
+        card_speed = QFrame()
+        card_speed.setProperty("class", "stat-card")
+        spd_h = QHBoxLayout(card_speed)
+        spd_h.setContentsMargins(16, 12, 16, 12)
+        spd_v = QVBoxLayout()
+        spd_v.setSpacing(2)
+        lbl_spd_title = QLabel("⚡ Speed & Time")
+        lbl_spd_title.setProperty("class", "metric-title")
+        self.val_speed = QLabel("0 B/s")
+        self.val_speed.setProperty("class", "metric-value")
+        time_eta_row = QHBoxLayout()
+        time_eta_row.setContentsMargins(0, 0, 0, 0)
+        time_eta_row.setSpacing(4)
+        lbl_elapsed_prefix = QLabel("Elapsed")
+        lbl_elapsed_prefix.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
+        self.val_time = QLabel("00:00")
+        self.val_time.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 600; background-color: transparent;")
+        self.val_eta = QLabel("")
+        self.val_eta.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
+        time_eta_row.addWidget(lbl_elapsed_prefix)
+        time_eta_row.addWidget(self.val_time)
+        time_eta_row.addWidget(self.val_eta)
+        time_eta_row.addStretch()
+        spd_v.addWidget(lbl_spd_title)
+        spd_v.addWidget(self.val_speed)
+        spd_v.addLayout(time_eta_row)
+        spd_icon = QLabel("🚀")
+        spd_icon.setStyleSheet("font-size: 22px; background-color: transparent;")
+        spd_h.addLayout(spd_v, 1)
+        spd_h.addWidget(spd_icon)
+        stats_row.addWidget(card_speed, 0, 2)
+
+        step3_layout.addLayout(stats_row)
+
+        # Row 2: Dual Clean Progress Card + Transfer Controls
+        prog_box = QFrame()
+        prog_box.setProperty("class", "card")
+        prog_box_layout = QVBoxLayout(prog_box)
+        prog_box_layout.setContentsMargins(18, 14, 18, 14)
+        prog_box_layout.setSpacing(8)
+
         file_prog_header = QHBoxLayout()
         lbl_cur = QLabel("Current File:")
-        lbl_cur.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        lbl_cur.setStyleSheet("font-size: 12px; font-weight: 600; color: #64748b; background-color: transparent;")
         self.file_label = QLabel("Idle")
-        self.file_label.setStyleSheet("font-size: 11px; color: #f1f5f9; font-weight: 600;")
+        self.file_label.setStyleSheet("font-size: 12px; font-weight: 600; background-color: transparent;")
         file_prog_header.addWidget(lbl_cur)
-        file_prog_header.addWidget(self.file_label)
-        file_prog_header.addStretch()
+        file_prog_header.addWidget(self.file_label, 1)
         self.file_pct_label = QLabel("0%")
-        self.file_pct_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #38bdf8;")
+        self.file_pct_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #0ea5e9; background-color: transparent;")
         file_prog_header.addWidget(self.file_pct_label)
-        progress_layout.addLayout(file_prog_header)
+        prog_box_layout.addLayout(file_prog_header)
 
         self.file_progress = QProgressBar()
         self.file_progress.setRange(0, 100)
         self.file_progress.setValue(0)
-        progress_layout.addWidget(self.file_progress)
+        prog_box_layout.addWidget(self.file_progress)
 
-        # Overall Progress Row
         overall_prog_header = QHBoxLayout()
-        lbl_all = QLabel("Overall Download Progress:")
-        lbl_all.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        lbl_all = QLabel("Overall Batch Progress:")
+        lbl_all.setStyleSheet("font-size: 12px; font-weight: 600; color: #64748b; background-color: transparent;")
         self.folder_label = QLabel("Idle")
-        self.folder_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        self.folder_label.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
         overall_prog_header.addWidget(lbl_all)
-        overall_prog_header.addWidget(self.folder_label)
-        overall_prog_header.addStretch()
+        overall_prog_header.addWidget(self.folder_label, 1)
         self.overall_pct_label = QLabel("0%")
-        self.overall_pct_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #10b981;")
+        self.overall_pct_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #10b981; background-color: transparent;")
         overall_prog_header.addWidget(self.overall_pct_label)
-        progress_layout.addLayout(overall_prog_header)
+        prog_box_layout.addLayout(overall_prog_header)
 
         self.overall_progress = QProgressBar()
         self.overall_progress.setProperty("class", "overall")
         self.overall_progress.setRange(0, 100)
         self.overall_progress.setValue(0)
-        progress_layout.addWidget(self.overall_progress)
+        prog_box_layout.addWidget(self.overall_progress)
 
-        # Live Metrics Grid
-        metrics_grid = QGridLayout()
-        metrics_grid.setSpacing(10)
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(8)
+        self.btn_back_to_files = QPushButton("← Back to File Selection")
+        self.btn_back_to_files.setProperty("class", "ad-cta")
+        self.btn_back_to_files.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_back_to_files.clicked.connect(lambda: self.go_to_step(1))
+        controls_row.addWidget(self.btn_back_to_files)
 
-        # Speed Card
-        c_speed = QFrame()
-        c_speed.setProperty("class", "metric-card")
-        l_speed = QVBoxLayout(c_speed)
-        l_speed.setContentsMargins(6, 4, 6, 4)
-        t_speed = QLabel("⚡ Speed")
-        t_speed.setProperty("class", "metric-title")
-        self.val_speed = QLabel("0 B/s")
-        self.val_speed.setProperty("class", "metric-value")
-        l_speed.addWidget(t_speed)
-        l_speed.addWidget(self.val_speed)
-        metrics_grid.addWidget(c_speed, 0, 0)
+        controls_row.addStretch()
 
-        # Transferred Card
-        c_data = QFrame()
-        c_data.setProperty("class", "metric-card")
-        l_data = QVBoxLayout(c_data)
-        l_data.setContentsMargins(6, 4, 6, 4)
-        t_data = QLabel("📦 Transferred")
-        t_data.setProperty("class", "metric-title")
-        self.val_data = QLabel("0 B")
-        self.val_data.setProperty("class", "metric-value")
-        l_data.addWidget(t_data)
-        l_data.addWidget(self.val_data)
-        metrics_grid.addWidget(c_data, 0, 1)
-
-        # Files Completed Card
-        c_files = QFrame()
-        c_files.setProperty("class", "metric-card")
-        l_files = QVBoxLayout(c_files)
-        l_files.setContentsMargins(6, 4, 6, 4)
-        t_files = QLabel("📑 Files")
-        t_files.setProperty("class", "metric-title")
-        self.val_files = QLabel("0 files")
-        self.val_files.setProperty("class", "metric-value")
-        l_files.addWidget(t_files)
-        l_files.addWidget(self.val_files)
-        metrics_grid.addWidget(c_files, 0, 2)
-
-        # Time Card
-        c_time = QFrame()
-        c_time.setProperty("class", "metric-card")
-        l_time = QVBoxLayout(c_time)
-        l_time.setContentsMargins(6, 4, 6, 4)
-        t_time = QLabel("⏱️ Time Elapsed")
-        t_time.setProperty("class", "metric-title")
-        self.val_time = QLabel("00:00")
-        self.val_time.setProperty("class", "metric-value")
-        l_time.addWidget(t_time)
-        l_time.addWidget(self.val_time)
-        metrics_grid.addWidget(c_time, 0, 3)
-
-        progress_layout.addLayout(metrics_grid)
-
-        # Action Buttons Row
-        actions_row = QHBoxLayout()
-        actions_row.setSpacing(12)
-
-        self.start_button = QPushButton("📋  Paste Link & Select Files to Start")
-        self.start_button.setProperty("class", "btn-start")
-        self.start_button.setEnabled(False)
-        self.start_button.clicked.connect(self.start_download)
-
-        self.btn_verify_files = QPushButton("🔍  Verify Files")
-        self.btn_verify_files.setProperty("class", "btn-primary")
-        self.btn_verify_files.setEnabled(False)
-        self.btn_verify_files.setToolTip("Verify existing downloaded files against Dropbox cloud checksums without re-downloading intact files.")
-        self.btn_verify_files.clicked.connect(self.start_verification_only)
+        self.btn_step3_open_folder = QPushButton("📂 Open Folder")
+        self.btn_step3_open_folder.setProperty("class", "btn-secondary")
+        self.btn_step3_open_folder.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_step3_open_folder.clicked.connect(self.open_destination_folder)
+        controls_row.addWidget(self.btn_step3_open_folder)
 
         self.pause_button = QPushButton("⏸  Pause Download")
         self.pause_button.setProperty("class", "btn-pause")
+        self.pause_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.pause_button.setVisible(False)
         self.pause_button.clicked.connect(self.toggle_pause_download)
+        controls_row.addWidget(self.pause_button)
 
         self.stop_button = QPushButton("⏹  Stop Download")
         self.stop_button.setProperty("class", "btn-stop")
+        self.stop_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self.stop_download)
+        controls_row.addWidget(self.stop_button)
 
-        actions_row.addWidget(self.start_button, 2)
-        actions_row.addWidget(self.btn_verify_files, 1)
-        actions_row.addWidget(self.pause_button, 1)
-        actions_row.addWidget(self.stop_button, 1)
-        progress_layout.addLayout(actions_row)
+        prog_box_layout.addLayout(controls_row)
+        step3_layout.addWidget(prog_box)
 
-        main_layout.addWidget(self.progress_card)
+        # Row 3: Design 1's Interactive Queue Filter Tabs (All / ✓ Downloaded / ⏳ Remaining)
+        queue_card = QFrame()
+        queue_card.setProperty("class", "card")
+        queue_layout = QVBoxLayout(queue_card)
+        queue_layout.setContentsMargins(18, 14, 18, 14)
+        queue_layout.setSpacing(10)
 
-        # 5. Activity Log Card
-        log_card = QFrame()
-        log_card.setProperty("class", "card")
-        log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(14, 12, 14, 12)
-        log_layout.setSpacing(8)
+        qtab_header = QHBoxLayout()
+        qtab_header.setSpacing(8)
 
+        self.btn_qtab_all = QPushButton("All Selected (0)")
+        self.btn_qtab_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_qtab_all.clicked.connect(lambda: self.set_queue_filter("all"))
+
+        self.btn_qtab_done = QPushButton("✓ Downloaded (0)")
+        self.btn_qtab_done.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_qtab_done.clicked.connect(lambda: self.set_queue_filter("done"))
+
+        self.btn_qtab_rem = QPushButton("⏳ Remaining / Up Next (0)")
+        self.btn_qtab_rem.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_qtab_rem.clicked.connect(lambda: self.set_queue_filter("rem"))
+
+        qtab_header.addWidget(self.btn_qtab_all)
+        qtab_header.addWidget(self.btn_qtab_done)
+        qtab_header.addWidget(self.btn_qtab_rem)
+        qtab_header.addStretch()
+
+        self.lbl_integrity_badge = QLabel("SHA-256 Checksum Verified ✓")
+        self.lbl_integrity_badge.setStyleSheet("font-size: 11px; color: #10b981; font-weight: 600; background-color: transparent;")
+        qtab_header.addWidget(self.lbl_integrity_badge)
+        queue_layout.addLayout(qtab_header)
+
+        self.queue_tree = QTreeWidget()
+        self.queue_tree.setHeaderLabels(["File", "Folder", "Status • Size"])
+        self.queue_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.queue_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.queue_tree.setRootIsDecorated(False)
+        self.queue_tree.setMinimumHeight(165)
+        self.queue_tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        queue_layout.addWidget(self.queue_tree, 1)
+
+        step3_layout.addWidget(queue_card, 1)
+
+        step3_outer.addWidget(self.progress_card, 1)
+        step3_outer.addStretch(1)
+        self.wizard_stack.addWidget(step3_page)
+
+        workspace_layout.addWidget(self.wizard_stack, 1)
+        workspace_scroll.setWidget(workspace_container)
+        root_layout.addWidget(workspace_scroll, 1)
+
+        # ----------------------------------------------------------------------
+        # PERSISTENT CLEAN BOTTOM BANNER AD
+        # ----------------------------------------------------------------------
+        ad_outer = QHBoxLayout()
+        ad_outer.setContentsMargins(24, 4, 24, 16)
+        ad_outer.addStretch(1)
+        self.ad_banner = AdBannerWidget(self)
+        self.ad_banner.setMaximumWidth(920)
+        self.ad_banner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        ad_outer.addWidget(self.ad_banner, 1)
+        ad_outer.addStretch(1)
+        root_layout.addLayout(ad_outer)
+
+        self.setCentralWidget(root_widget)
+
+        # ----------------------------------------------------------------------
+        # CORNER SETTINGS SLIDE-OVER DRAWER OVERLAY
+        # ----------------------------------------------------------------------
+        self.settings_overlay = QWidget(self)
+        self.settings_overlay.setVisible(False)
+        overlay_layout = QHBoxLayout(self.settings_overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.setSpacing(0)
+
+        self.settings_backdrop = _ClickBackdrop(self.settings_overlay)
+        self.settings_backdrop.clicked.connect(self.close_settings_drawer)
+        overlay_layout.addWidget(self.settings_backdrop, 1)
+
+        self.settings_drawer = QFrame(self.settings_overlay)
+        self.settings_drawer.setProperty("class", "settings-drawer")
+        self.settings_drawer.setFixedWidth(430)
+        drawer_outer = QVBoxLayout(self.settings_drawer)
+        drawer_outer.setContentsMargins(20, 18, 20, 18)
+        drawer_outer.setSpacing(14)
+
+        drawer_header = QHBoxLayout()
+        drawer_title = QLabel("⚙️ Settings & Diagnostics")
+        drawer_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        drawer_title.setStyleSheet("background-color: transparent; font-weight: 700;")
+        drawer_header.addWidget(drawer_title)
+        drawer_header.addStretch()
+
+        self.btn_close_settings = QPushButton("✕ Close")
+        self.btn_close_settings.setProperty("class", "btn-secondary")
+        self.btn_close_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_close_settings.clicked.connect(self.close_settings_drawer)
+        drawer_header.addWidget(self.btn_close_settings)
+        drawer_outer.addLayout(drawer_header)
+
+        drawer_scroll = QScrollArea()
+        drawer_scroll.setWidgetResizable(True)
+        drawer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        drawer_content = QWidget()
+        drawer_layout = QVBoxLayout(drawer_content)
+        drawer_layout.setContentsMargins(0, 4, 4, 4)
+        drawer_layout.setSpacing(16)
+
+        # 1. Default Download Folder
+        dest_sec = QVBoxLayout()
+        dest_sec.setSpacing(6)
+        dest_lbl = QLabel("DEFAULT DOWNLOAD FOLDER")
+        dest_lbl.setProperty("class", "section-title")
+        dest_sec.addWidget(dest_lbl)
+
+        dest_row = QHBoxLayout()
+        dest_row.setSpacing(6)
+        self.destination_input = QLineEdit()
+        self.destination_input.setText(str(Path.home() / "Downloads"))
+        self.destination_input.setPlaceholderText("Select local folder to save files...")
+        self.destination_input.textChanged.connect(self._on_destination_changed)
+
+        self.btn_browse = QPushButton("Browse")
+        self.btn_browse.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_browse.clicked.connect(self.browse_destination)
+
+        self.btn_open_folder = QPushButton("Open")
+        self.btn_open_folder.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_open_folder.clicked.connect(self.open_destination_folder)
+
+        dest_row.addWidget(self.destination_input, 1)
+        dest_row.addWidget(self.btn_browse)
+        dest_row.addWidget(self.btn_open_folder)
+        dest_sec.addLayout(dest_row)
+        drawer_layout.addLayout(dest_sec)
+
+        # 2. Smart Download & Integrity Rules
+        rules_sec = QVBoxLayout()
+        rules_sec.setSpacing(8)
+        rules_lbl = QLabel("DOWNLOAD & INTEGRITY RULES")
+        rules_lbl.setProperty("class", "section-title")
+        rules_sec.addWidget(rules_lbl)
+
+        self.check_skip_existing = QCheckBox("Skip files that already exist locally (matching exact size)")
+        self.check_skip_existing.setChecked(True)
+        self.check_skip_existing.stateChanged.connect(lambda: self.save_settings())
+        rules_sec.addWidget(self.check_skip_existing)
+
+        self.check_verify_integrity = QCheckBox("Verify SHA-256 checksum after download")
+        self.check_verify_integrity.setChecked(True)
+        self.check_verify_integrity.stateChanged.connect(self._on_verify_setting_changed)
+        rules_sec.addWidget(self.check_verify_integrity)
+
+        self.check_auto_repair = QCheckBox("Auto re-download if file is corrupted")
+        self.check_auto_repair.setChecked(True)
+        self.check_auto_repair.stateChanged.connect(lambda: self.save_settings())
+        rules_sec.addWidget(self.check_auto_repair)
+        drawer_layout.addLayout(rules_sec)
+
+        # 3. Dropbox Account
+        acct_sec = QVBoxLayout()
+        acct_sec.setSpacing(6)
+        acct_lbl = QLabel("DROPBOX ACCOUNT")
+        acct_lbl.setProperty("class", "section-title")
+        acct_sec.addWidget(acct_lbl)
+
+        account_pill = QFrame()
+        account_pill.setProperty("class", "subtle-card")
+        account_pill_layout = QHBoxLayout(account_pill)
+        account_pill_layout.setContentsMargins(12, 10, 12, 10)
+        account_pill_layout.setSpacing(8)
+
+        self.account_info_layout = QVBoxLayout()
+        self.account_info_layout.setSpacing(2)
+        self.account_name_label = QLabel("No Dropbox account connected")
+        self.account_name_label.setStyleSheet("font-size: 12px; font-weight: 700; background-color: transparent;")
+        self.account_sub_label = QLabel("Sign in to your Dropbox account")
+        self.account_sub_label.setStyleSheet("font-size: 11px; color: #64748b; background-color: transparent;")
+        self.account_info_layout.addWidget(self.account_name_label)
+        self.account_info_layout.addWidget(self.account_sub_label)
+        account_pill_layout.addLayout(self.account_info_layout, 1)
+
+        self.btn_oauth_login = QPushButton("🌐  Log In")
+        self.btn_oauth_login.setProperty("class", "btn-primary")
+        self.btn_oauth_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_oauth_login.clicked.connect(self.login_with_dropbox)
+        account_pill_layout.addWidget(self.btn_oauth_login)
+
+        self.btn_logout = QPushButton("Sign Out")
+        self.btn_logout.setProperty("class", "btn-stop")
+        self.btn_logout.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_logout.clicked.connect(self.logout_dropbox)
+        self.btn_logout.setVisible(False)
+        account_pill_layout.addWidget(self.btn_logout)
+
+        acct_sec.addWidget(account_pill)
+        drawer_layout.addLayout(acct_sec)
+
+        # 4. Appearance
+        theme_sec = QVBoxLayout()
+        theme_sec.setSpacing(6)
+        theme_lbl = QLabel("APPEARANCE")
+        theme_lbl.setProperty("class", "section-title")
+        theme_sec.addWidget(theme_lbl)
+
+        self.btn_theme_toggle = QPushButton("🌙  Switch to Minimal Dark Mode")
+        self.btn_theme_toggle.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_theme_toggle.clicked.connect(self.toggle_theme)
+        theme_sec.addWidget(self.btn_theme_toggle)
+        drawer_layout.addLayout(theme_sec)
+
+        # 5. Activity Log & Diagnostics
+        log_sec = QVBoxLayout()
+        log_sec.setSpacing(6)
         log_header = QHBoxLayout()
-        log_title = QLabel("Activity Log")
+        log_title = QLabel("ACTIVITY LOG")
         log_title.setProperty("class", "section-title")
         log_header.addWidget(log_title)
         log_header.addStretch()
 
-        self.log_filter = QLineEdit()
-        self.log_filter.setPlaceholderText("Filter logs...")
-        self.log_filter.setFixedWidth(180)
-        self.log_filter.textChanged.connect(self.filter_logs)
-        log_header.addWidget(self.log_filter)
-
         btn_copy = QPushButton("Copy")
+        btn_copy.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_copy.clicked.connect(self.copy_log)
         btn_clear = QPushButton("Clear")
+        btn_clear.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_clear.clicked.connect(self.clear_log)
         self.btn_toggle_log = QPushButton("Hide Log")
+        self.btn_toggle_log.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_toggle_log.clicked.connect(self.toggle_log_visibility)
 
         log_header.addWidget(btn_copy)
         log_header.addWidget(btn_clear)
         log_header.addWidget(self.btn_toggle_log)
-        log_layout.addLayout(log_header)
+        log_sec.addLayout(log_header)
+
+        self.log_filter = QLineEdit()
+        self.log_filter.setPlaceholderText("Filter logs...")
+        self.log_filter.textChanged.connect(self.filter_logs)
+        log_sec.addWidget(self.log_filter)
 
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(130)
-        log_layout.addWidget(self.log_box)
+        self.log_box.setMinimumHeight(140)
+        log_sec.addWidget(self.log_box)
+        drawer_layout.addLayout(log_sec)
 
-        main_layout.addWidget(log_card)
+        drawer_layout.addStretch(1)
+        drawer_scroll.setWidget(drawer_content)
+        drawer_outer.addWidget(drawer_scroll, 1)
+
+        drawer_footer = QHBoxLayout()
+        drawer_footer.addStretch()
+        btn_save_close = QPushButton("Save & Close")
+        btn_save_close.setProperty("class", "btn-primary")
+        btn_save_close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_save_close.clicked.connect(self._save_and_close_settings)
+        drawer_footer.addWidget(btn_save_close)
+        drawer_outer.addLayout(drawer_footer)
+
+        overlay_layout.addWidget(self.settings_drawer)
 
         self.all_log_lines: list[str] = []
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(main_widget)
-        self.setCentralWidget(scroll)
+        # Initialize states
+        self.apply_theme("light", save=False)
+        self._on_destination_changed(self.destination_input.text())
+        self.go_to_step(0)
+        self.set_queue_filter("all")
+        self.show_empty_tree_placeholder()
+        self._show_empty_queue_placeholder()
 
+    # ==========================================================================
+    # Wizard Navigation, Settings Drawer & Queue Filter Tabs
+    # ==========================================================================
+    def resizeEvent(self, event: QResizeEvent):
+        super().resizeEvent(event)
+        if hasattr(self, "settings_overlay") and self.settings_overlay is not None:
+            self.settings_overlay.setGeometry(self.rect())
+
+    def go_to_step(self, step_index: int):
+        idx = max(0, min(int(step_index), 2))
+        self.current_step = idx
+        self.wizard_stack.setCurrentIndex(idx)
+
+        step_buttons = [self.btn_step_1, self.btn_step_2, self.btn_step_3]
+        for i, btn in enumerate(step_buttons):
+            cls_name = "wizard-step-btn-active" if i == idx else "wizard-step-btn"
+            btn.setProperty("class", cls_name)
+            self._repolish(btn)
+
+    def open_settings_drawer(self):
+        self.settings_overlay.setGeometry(self.rect())
+        self.settings_overlay.setVisible(True)
+        self.settings_overlay.raise_()
+
+    def close_settings_drawer(self):
+        self.settings_overlay.setVisible(False)
+
+    def toggle_settings_drawer(self):
+        if self.settings_overlay.isVisible():
+            self.close_settings_drawer()
+        else:
+            self.open_settings_drawer()
+
+    def _save_and_close_settings(self):
+        self.save_settings()
+        self.close_settings_drawer()
+
+    def _on_destination_changed(self, text: str):
+        dest_str = text.strip() or str(Path.home() / "Downloads")
+        if hasattr(self, "dest_summary_label"):
+            short_dest = dest_str if len(dest_str) <= 46 else ("…" + dest_str[-44:])
+            self.dest_summary_label.setText(f"Saving to: {short_dest}")
+            self.dest_summary_label.setToolTip(dest_str)
+
+    def _on_verify_setting_changed(self):
+        self.save_settings()
+        if hasattr(self, "lbl_integrity_badge"):
+            if self.check_verify_integrity.isChecked():
+                self.lbl_integrity_badge.setText("SHA-256 Checksum Verified ✓")
+                self.lbl_integrity_badge.setStyleSheet(
+                    "font-size: 11px; color: #10b981; font-weight: 600; background-color: transparent;"
+                )
+            else:
+                self.lbl_integrity_badge.setText("Standard Mode (Checksum Off)")
+                self.lbl_integrity_badge.setStyleSheet(
+                    "font-size: 11px; color: #64748b; font-weight: 600; background-color: transparent;"
+                )
+
+    def set_queue_filter(self, mode: str):
+        if mode not in ("all", "done", "rem"):
+            mode = "all"
+        self.queue_filter_mode = mode
+
+        tab_map = {
+            "all": self.btn_qtab_all,
+            "done": self.btn_qtab_done,
+            "rem": self.btn_qtab_rem,
+        }
+        for key, btn in tab_map.items():
+            btn.setProperty("class", "qtab-btn-active" if key == mode else "qtab-btn")
+            self._repolish(btn)
+
+        self._apply_queue_filter_visibility()
+
+    def _show_empty_queue_placeholder(self):
+        self.queue_tree.clear()
+        placeholder = QTreeWidgetItem(
+            self.queue_tree,
+            ["Select files in Step 2 to view downloaded and remaining queue details", "—", "—"],
+        )
+        placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+        col = QColor("#64748b")
+        for c in range(3):
+            placeholder.setForeground(c, col)
+
+    def _make_queue_key(self, folder_display: str, file_display: str) -> str:
+        return f"{folder_display}::{file_display}"
+
+    def rebuild_queue_from_selection(self):
+        """Populate Step 3 queue list and Downloaded/Remaining preview from selected tree files."""
+        info = self.get_tree_selection_info()
+        selected_entries: list[dict[str, Any]] = []
+
+        if self._tree_items_data and info.get("has_tree_items"):
+            for e in self._tree_items_data:
+                if e.get("is_dir"):
+                    continue
+                rel = e.get("path") or e.get("rel_path") or ""
+                if is_path_selected(
+                    rel,
+                    info["selected_files"],
+                    info["deselected_files"],
+                    info["selected_folders"],
+                    info["deselected_folders"],
+                    True,
+                ):
+                    selected_entries.append(
+                        {
+                            "name": e.get("name") or Path(rel).name,
+                            "rel_path": rel,
+                            "size": int(e.get("size", 0) or 0),
+                        }
+                    )
+        elif info.get("has_tree_items"):
+            def _collect_checked(item: QTreeWidgetItem | None):
+                if item is None or item.data(0, Qt.ItemDataRole.UserRole) is None:
+                    return
+                is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
+                if is_dir:
+                    for idx in range(item.childCount()):
+                        _collect_checked(item.child(idx))
+                elif item.checkState(0) == Qt.CheckState.Checked:
+                    rel = item.data(0, Qt.ItemDataRole.UserRole) or ""
+                    raw_name = item.data(3, Qt.ItemDataRole.UserRole) or Path(rel).name
+                    sz = int(item.data(2, Qt.ItemDataRole.UserRole) or 0)
+                    selected_entries.append({"name": raw_name, "rel_path": rel, "size": sz})
+
+            for i in range(self.tree_widget.topLevelItemCount()):
+                _collect_checked(self.tree_widget.topLevelItem(i))
+
+        selected_entries.sort(key=lambda d: natural_sort_path_key(d["rel_path"]))
+
+        # Match DownloadWorker's single-folder destination stripping so keys align 100%
+        dest_str = self.destination_input.text().strip()
+        if dest_str and selected_entries:
+            matched_folder, stripped_prefix = check_single_folder_destination_match(
+                selected_entries,
+                Path(dest_str),
+                info.get("single_selected_folder", ""),
+            )
+            if matched_folder and stripped_prefix:
+                for d in selected_entries:
+                    d["rel_path"] = strip_folder_prefix(d["rel_path"], stripped_prefix)
+
+        self._queue_records.clear()
+        self._queue_tree_items.clear()
+        self._active_queue_key = ""
+
+        total_bytes = 0
+        self.queue_tree.setUpdatesEnabled(False)
+        try:
+            self.queue_tree.clear()
+            if not selected_entries:
+                self._show_empty_queue_placeholder()
+            else:
+                for idx, entry in enumerate(selected_entries):
+                    rel_clean = str(entry["rel_path"]).replace("\\", "/").strip("/")
+                    folder_disp = Path(rel_clean).parent.as_posix() if "/" in rel_clean else "/ (Root)"
+                    file_disp = entry["name"] or Path(rel_clean).name
+                    sz = int(entry["size"] or 0)
+                    total_bytes += sz
+                    base_key = self._make_queue_key(folder_disp, file_disp)
+                    key = base_key if base_key not in self._queue_records else f"{base_key}#{idx}"
+
+                    _, icon_str = get_file_type_and_icon(file_disp)
+                    status_label = "⏳ Up Next" if idx == 0 else "⏳ Queued"
+                    sz_str = format_bytes(sz)
+                    row_item = QTreeWidgetItem([f"{icon_str}{file_disp}", folder_disp, f"{status_label} • {sz_str}"])
+                    self.queue_tree.addTopLevelItem(row_item)
+
+                    rec = {
+                        "key": key,
+                        "name": file_disp,
+                        "folder": folder_disp,
+                        "size": sz,
+                        "status": "queued",
+                        "progress": 0,
+                        "icon": icon_str,
+                    }
+                    self._queue_records[key] = rec
+                    self._queue_tree_items[key] = row_item
+                    self._style_queue_row(row_item, "queued")
+        finally:
+            self.queue_tree.setUpdatesEnabled(True)
+
+        self._total_batch_files = len(selected_entries)
+        self._total_batch_bytes = total_bytes
+        self._refresh_queue_counts_and_cards()
+        self._apply_queue_filter_visibility()
+
+    def _style_queue_row(self, item: QTreeWidgetItem, status: str):
+        is_light = self.theme_mode == "light"
+        palette = {
+            "downloading": "#0284c7" if is_light else "#38bdf8",
+            "verifying": "#7c3aed" if is_light else "#c084fc",
+            "done": "#059669" if is_light else "#34d399",
+            "skipped": "#059669" if is_light else "#34d399",
+            "verified": "#059669" if is_light else "#34d399",
+            "queued": "#d97706" if is_light else "#fbbf24",
+            "error": "#dc2626" if is_light else "#f87171",
+        }
+        fg_main = QColor("#0f172a" if is_light else "#f1f5f9")
+        fg_muted = QColor("#64748b" if is_light else "#94a3b8")
+        fg_status = QColor(palette.get(status, "#64748b"))
+        item.setForeground(0, fg_main)
+        item.setForeground(1, fg_muted)
+        item.setForeground(2, fg_status)
+
+    def _refresh_all_queue_item_styles(self):
+        for key, rec in self._queue_records.items():
+            row_item = self._queue_tree_items.get(key)
+            if row_item is not None:
+                self._style_queue_row(row_item, rec["status"])
+
+    def _is_completed_status(self, status: str) -> bool:
+        return status in ("done", "skipped", "verified")
+
+    def _apply_queue_filter_visibility(self):
+        if not self._queue_records:
+            return
+        mode = self.queue_filter_mode
+        self.queue_tree.setUpdatesEnabled(False)
+        try:
+            for key, rec in self._queue_records.items():
+                item = self._queue_tree_items.get(key)
+                if item is None:
+                    continue
+                is_done = self._is_completed_status(rec["status"])
+                if mode == "all":
+                    item.setHidden(False)
+                elif mode == "done":
+                    item.setHidden(not is_done)
+                else:
+                    item.setHidden(is_done)
+        finally:
+            self.queue_tree.setUpdatesEnabled(True)
+
+    def _refresh_queue_counts_and_cards(self):
+        total = len(self._queue_records)
+        done_count = 0
+        done_bytes = 0
+        for rec in self._queue_records.values():
+            if self._is_completed_status(rec["status"]):
+                done_count += 1
+                done_bytes += int(rec["size"] or 0)
+
+        # Incorporate live worker counters if running
+        if self.worker is not None and (self._is_running or is_thread_running(self.download_thread)):
+            w_total = len(self.worker.files) or total
+            total = max(total, w_total)
+            w_done = int(self.worker.done + self.worker.skipped)
+            if self.worker.verify_only:
+                w_done = int(self.worker.verified_ok)
+            done_count = max(done_count, min(w_done, total))
+            live_bytes = int(self.worker.bytes_done + self.worker.current_downloading_bytes)
+            done_bytes = max(done_bytes, live_bytes)
+
+        rem_count = max(total - done_count, 0)
+        total_bytes = max(self._total_batch_bytes, done_bytes)
+        rem_bytes = max(total_bytes - done_bytes, 0)
+
+        self.btn_qtab_all.setText(f"All Selected ({total})")
+        self.btn_qtab_done.setText(f"✓ Downloaded ({done_count})")
+        self.btn_qtab_rem.setText(f"⏳ Remaining / Up Next ({rem_count})")
+
+        if total > 0:
+            self.val_files.setText(f"{done_count} / {total} files")
+            self.val_data.setText(f"{format_bytes(done_bytes)} saved to disk")
+            self.val_remaining_files.setText(f"{rem_count} file{'s' if rem_count != 1 else ''} left")
+            self.val_remaining_bytes.setText(f"{format_bytes(rem_bytes)} remaining")
+            self.btn_step_3.setText(f"3. Transfers ({done_count}/{total})")
+        else:
+            self.val_files.setText("0 files")
+            self.val_data.setText("0 B saved to disk")
+            self.val_remaining_files.setText("0 files left")
+            self.val_remaining_bytes.setText("0 B remaining")
+            self.btn_step_3.setText("3. Transfers")
+
+        # Live ETA calculation when actively transferring
+        if (
+            self.worker is not None
+            and (self._is_running or is_thread_running(self.download_thread))
+            and getattr(self.worker, "instant_speed", 0.0) > 0
+            and rem_bytes > 0
+            and not self.is_download_paused
+        ):
+            eta_secs = int(rem_bytes / max(self.worker.instant_speed, 1.0))
+            if eta_secs < 60:
+                self.val_eta.setText(f"• ETA ~{max(eta_secs, 1)}s")
+            else:
+                mins, secs = divmod(eta_secs, 60)
+                self.val_eta.setText(f"• ETA ~{mins:02d}:{secs:02d}")
+        else:
+            self.val_eta.setText("")
+
+    def _find_queue_key(self, folder_display: str | None, file_display: str) -> str | None:
+        if folder_display is not None:
+            exact = self._make_queue_key(folder_display, file_display)
+            if exact in self._queue_records:
+                return exact
+        # Fallback match by file name preferring non-completed entries
+        for key, rec in self._queue_records.items():
+            if rec["name"] == file_display and not self._is_completed_status(rec["status"]):
+                return key
+        for key, rec in self._queue_records.items():
+            if rec["name"] == file_display:
+                return key
+        return None
+
+    def _set_queue_item_status(
+        self,
+        key: str,
+        status: str,
+        progress: int | None = None,
+        move_to_end: bool = False,
+    ):
+        rec = self._queue_records.get(key)
+        item = self._queue_tree_items.get(key)
+        if rec is None or item is None:
+            return
+
+        rec["status"] = status
+        if progress is not None:
+            rec["progress"] = progress
+        sz_str = format_bytes(rec["size"])
+
+        if status == "downloading":
+            pct = rec["progress"]
+            label = f"⬇ Downloading ({pct}%) • {sz_str}"
+        elif status == "verifying":
+            pct = rec["progress"]
+            label = f"🔍 Verifying ({pct}%) • {sz_str}"
+        elif status == "done":
+            verified_tag = " & Verified" if self.check_verify_integrity.isChecked() else ""
+            label = f"✓ Downloaded{verified_tag} • {sz_str}"
+        elif status == "skipped":
+            label = f"✓ Already Exists • {sz_str}"
+        elif status == "verified":
+            label = f"✓ Verified Intact • {sz_str}"
+        elif status == "error":
+            label = f"❌ Failed / Corrupted • {sz_str}"
+        else:
+            label = f"⏳ Queued • {sz_str}"
+
+        item.setText(2, label)
+        self._style_queue_row(item, status)
+
+        if move_to_end:
+            idx = self.queue_tree.indexOfTopLevelItem(item)
+            if idx >= 0:
+                taken = self.queue_tree.takeTopLevelItem(idx)
+                if taken is not None:
+                    self.queue_tree.addTopLevelItem(taken)
+
+        is_done = self._is_completed_status(status)
+        if self.queue_filter_mode == "done":
+            item.setHidden(not is_done)
+        elif self.queue_filter_mode == "rem":
+            item.setHidden(is_done)
+        else:
+            item.setHidden(False)
+
+        self._refresh_queue_counts_and_cards()
+
+    def _update_queue_from_log(self, raw_text: str):
+        if not self._queue_records:
+            return
+
+        for line in raw_text.splitlines():
+            clean = line.strip()
+            if not clean:
+                continue
+
+            m = self._RE_START_FILE.match(clean)
+            if m:
+                key = self._find_queue_key(m.group(1), m.group(2))
+                if key:
+                    self._active_queue_key = key
+                    self._set_queue_item_status(key, "downloading", progress=0)
+                continue
+
+            m = self._RE_DONE_FILE.match(clean)
+            if m:
+                key = self._find_queue_key(m.group(1), m.group(2))
+                if key:
+                    if self._active_queue_key == key:
+                        self._active_queue_key = ""
+                    self._set_queue_item_status(key, "done", progress=100)
+                continue
+
+            m = self._RE_SKIP_FILE.match(clean)
+            if m:
+                key = self._find_queue_key(m.group(1), m.group(2))
+                if key:
+                    self._set_queue_item_status(key, "skipped", progress=100)
+                continue
+
+            m = self._RE_VERIFIED_FILE.match(clean)
+            if m:
+                key = self._find_queue_key(m.group(1), m.group(2))
+                if key:
+                    if self._active_queue_key == key:
+                        self._active_queue_key = ""
+                    self._set_queue_item_status(key, "verified", progress=100)
+                continue
+
+            m = self._RE_QUEUE_FILE.match(clean)
+            if m:
+                key = self._find_queue_key(m.group(1), m.group(2))
+                if key:
+                    if self._active_queue_key == key:
+                        self._active_queue_key = ""
+                    self._set_queue_item_status(key, "queued", progress=0, move_to_end=True)
+                continue
+
+            m = self._RE_REQUEUED_ONLY.match(clean)
+            if m:
+                key = self._find_queue_key(None, m.group(1))
+                if key:
+                    if self._active_queue_key == key:
+                        self._active_queue_key = ""
+                    self._set_queue_item_status(key, "queued", progress=0, move_to_end=True)
+                continue
+
+            m = self._RE_ERROR_FILE.match(clean)
+            if m:
+                key = self._find_queue_key(m.group(1), m.group(2))
+                if key:
+                    if self._active_queue_key == key:
+                        self._active_queue_key = ""
+                    self._set_queue_item_status(key, "error")
+                continue
+
+    # ==========================================================================
+    # Account & Feature State Management
+    # ==========================================================================
     def get_app_key(self) -> str:
         return os.getenv("DROPBOX_APP_KEY", "").strip()
 
@@ -644,25 +1545,23 @@ class MainWindow(QMainWindow):
             email = self.current_user_email or "OAuth Account"
             self.account_name_label.setText(f"👤 {display_name}")
             self.account_sub_label.setText(email)
-            self.account_sub_label.setStyleSheet("font-size: 10px; color: #94a3b8;")
             self.set_auth_badge("● Connected", "connected")
             self.btn_oauth_login.setText("🔄  Switch")
             self.btn_oauth_login.setProperty("class", "btn-secondary")
-            self.btn_oauth_login.style().unpolish(self.btn_oauth_login)
-            self.btn_oauth_login.style().polish(self.btn_oauth_login)
+            self._repolish(self.btn_oauth_login)
             self.btn_logout.setVisible(True)
             self.login_banner.setVisible(False)
+            self.btn_header_login.setVisible(False)
         else:
             self.account_name_label.setText("No Dropbox account connected")
             self.account_sub_label.setText("Sign in to your Dropbox account")
-            self.account_sub_label.setStyleSheet("font-size: 10px; color: #94a3b8;")
             self.set_auth_badge("○ Not Logged In", "neutral")
             self.btn_oauth_login.setText("🌐  Log In")
             self.btn_oauth_login.setProperty("class", "btn-primary")
-            self.btn_oauth_login.style().unpolish(self.btn_oauth_login)
-            self.btn_oauth_login.style().polish(self.btn_oauth_login)
+            self._repolish(self.btn_oauth_login)
             self.btn_logout.setVisible(False)
             self.login_banner.setVisible(True)
+            self.btn_header_login.setVisible(True)
 
         self.update_feature_enabled_state()
 
@@ -675,8 +1574,8 @@ class MainWindow(QMainWindow):
         is_scanning = is_thread_running(self.scan_thread)
 
         if not logged_in:
-            # Strictly disable all operational features until user signs in
             self.target_card.setEnabled(False)
+            self.recent_card.setEnabled(False)
             self.tree_card.setEnabled(False)
             self.url_input.setEnabled(False)
             self.url_input.setPlaceholderText("Please log in first to enter a Dropbox link...")
@@ -688,12 +1587,9 @@ class MainWindow(QMainWindow):
             self.btn_browse.setEnabled(False)
             self.btn_open_folder.setEnabled(False)
             self.check_skip_existing.setEnabled(False)
-            if hasattr(self, "check_verify_integrity"):
-                self.check_verify_integrity.setEnabled(False)
-            if hasattr(self, "check_auto_repair"):
-                self.check_auto_repair.setEnabled(False)
-            if hasattr(self, "btn_verify_files"):
-                self.btn_verify_files.setEnabled(False)
+            self.check_verify_integrity.setEnabled(False)
+            self.check_auto_repair.setEnabled(False)
+            self.btn_verify_files.setEnabled(False)
             self.tree_widget.setEnabled(False)
             self.btn_select_all.setEnabled(False)
             self.btn_deselect_all.setEnabled(False)
@@ -705,6 +1601,7 @@ class MainWindow(QMainWindow):
         else:
             active = is_running or is_scanning
             self.target_card.setEnabled(not is_running)
+            self.recent_card.setEnabled(not active)
             self.tree_card.setEnabled(not is_running)
             self.url_input.setEnabled(not active)
             self.url_input.setPlaceholderText("https://www.dropbox.com/scl/fo/... or https://www.dropbox.com/sh/...")
@@ -716,11 +1613,10 @@ class MainWindow(QMainWindow):
             self.btn_browse.setEnabled(not is_running)
             self.btn_open_folder.setEnabled(not is_running)
             self.check_skip_existing.setEnabled(not is_running)
-            if hasattr(self, "check_verify_integrity"):
-                self.check_verify_integrity.setEnabled(not is_running)
-            if hasattr(self, "check_auto_repair"):
-                self.check_auto_repair.setEnabled(not is_running)
+            self.check_verify_integrity.setEnabled(not is_running)
+            self.check_auto_repair.setEnabled(not is_running)
             self.tree_widget.setEnabled(not is_running)
+
             has_items = False
             for i in range(self.tree_widget.topLevelItemCount()):
                 item = self.tree_widget.topLevelItem(i)
@@ -733,18 +1629,18 @@ class MainWindow(QMainWindow):
             self.btn_deselect_all.setEnabled(can_act_tree)
             self.btn_expand_all.setEnabled(can_act_tree)
             self.btn_collapse_all.setEnabled(can_act_tree)
+
             if not active:
                 curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
                 if not any(k in curr.lower() for k in ("completed", "error", "stopped")):
                     self.set_status_badge("● Ready", "ready")
 
-            # Refresh placeholder item if tree is in empty placeholder state
             if self.tree_widget.topLevelItemCount() == 1:
                 item = self.tree_widget.topLevelItem(0)
                 if item and item.data(0, Qt.ItemDataRole.UserRole) is None:
                     self.show_empty_tree_placeholder()
                     if not self.url_input.text().strip():
-                        self.set_selection_summary("(Paste link above to inspect folders)", "neutral")
+                        self.set_selection_summary("(Paste link in Step 1 to inspect folders)", "neutral")
 
         self.update_download_button_state()
 
@@ -765,35 +1661,30 @@ class MainWindow(QMainWindow):
 
         if is_running:
             self.start_button.setVisible(False)
-            if hasattr(self, "btn_verify_files"):
-                self.btn_verify_files.setVisible(False)
+            self.btn_verify_files.setVisible(False)
+            self.btn_view_active_transfer.setVisible(True)
             self.pause_button.setVisible(True)
             self.stop_button.setVisible(True)
             self.pause_button.setEnabled(True)
             self.stop_button.setEnabled(True)
             return
 
-        # Not running -> Hide pause and stop, show start button
         self.pause_button.setVisible(False)
         self.stop_button.setVisible(False)
+        self.btn_view_active_transfer.setVisible(False)
         self.start_button.setVisible(True)
-        if hasattr(self, "btn_verify_files"):
-            self.btn_verify_files.setVisible(True)
+        self.btn_verify_files.setVisible(True)
 
         if not logged_in:
             self.start_button.setEnabled(False)
             self.start_button.setText("🔒  Log In to Start")
-            self.start_button.setToolTip("Please sign in to Dropbox to enable downloading.")
-            if hasattr(self, "btn_verify_files"):
-                self.btn_verify_files.setEnabled(False)
+            self.btn_verify_files.setEnabled(False)
             return
 
         if is_scanning:
             self.start_button.setEnabled(False)
             self.start_button.setText("⏳  Loading Folders...")
-            self.start_button.setToolTip("Scanning Dropbox shared link hierarchy...")
-            if hasattr(self, "btn_verify_files"):
-                self.btn_verify_files.setEnabled(False)
+            self.btn_verify_files.setEnabled(False)
             return
 
         url = self.url_input.text().strip()
@@ -802,31 +1693,30 @@ class MainWindow(QMainWindow):
         info = self.get_tree_selection_info()
         has_tree = info.get("has_tree_items", False)
         selected_count = info.get("selected_file_count", 0)
+        selected_bytes = info.get("selected_bytes", 0)
 
         can_verify = bool(has_link and has_tree and selected_count > 0)
-        if hasattr(self, "btn_verify_files"):
-            self.btn_verify_files.setEnabled(can_verify)
-            if can_verify:
-                self.btn_verify_files.setText(f"🔍  Verify Files ({selected_count})")
-            else:
-                self.btn_verify_files.setText("🔍  Verify Files")
+        self.btn_verify_files.setEnabled(can_verify)
+        if can_verify:
+            self.btn_verify_files.setText(f"🔍  Verify Existing ({selected_count})")
+        else:
+            self.btn_verify_files.setText("🔍  Verify Existing")
 
         if not has_link:
             self.start_button.setEnabled(False)
             self.start_button.setText("📋  Paste Link & Select Files to Start")
-            self.start_button.setToolTip("Paste a Dropbox shared link above to get started.")
         elif not has_tree:
             self.start_button.setEnabled(False)
             self.start_button.setText("🔍  Load Folders to Select Files")
-            self.start_button.setToolTip("Click 'Load Folders' (or press Enter) to inspect files.")
         elif selected_count == 0:
             self.start_button.setEnabled(False)
             self.start_button.setText("☑  Select Files to Start")
-            self.start_button.setToolTip("Check at least one file or folder in the tree above to start download.")
         else:
             self.start_button.setEnabled(True)
-            self.start_button.setText(f"▶  Start Download ({selected_count} file{'s' if selected_count != 1 else ''})")
-            self.start_button.setToolTip(f"Download {selected_count} selected files to local destination")
+            size_part = f" • {format_bytes(selected_bytes)}" if selected_bytes > 0 else ""
+            self.start_button.setText(
+                f"⬇  Start Download ({selected_count} file{'s' if selected_count != 1 else ''}{size_part}) →"
+            )
 
     def toggle_pause_download(self):
         if self.worker:
@@ -837,23 +1727,21 @@ class MainWindow(QMainWindow):
         if is_paused:
             self.pause_button.setText("▶  Resume Download")
             self.pause_button.setProperty("class", "btn-resume")
-            st = self.pause_button.style()
-            if st is not None:
-                st.unpolish(self.pause_button)
-                st.polish(self.pause_button)
+            self._repolish(self.pause_button)
             self.set_status_badge("⏸ Paused", "warning")
             self.val_speed.setText("Paused")
+            self.val_eta.setText("")
             self.add_log("⏸ Download paused.")
         else:
             self.pause_button.setText("⏸  Pause Download")
             self.pause_button.setProperty("class", "btn-pause")
-            st = self.pause_button.style()
-            if st is not None:
-                st.unpolish(self.pause_button)
-                st.polish(self.pause_button)
+            self._repolish(self.pause_button)
             self.set_status_badge("● Downloading...", "running")
             self.add_log("▶ Download resumed.")
 
+    # ==========================================================================
+    # Recent Links Management (Chips + Detailed Recent Rows + Dropdown Menu)
+    # ==========================================================================
     def add_recent_link(self, url: str, title: str = "", item_count: int = 0):
         url = url.strip()
         if not url or "dropbox.com" not in url:
@@ -867,23 +1755,18 @@ class MainWindow(QMainWindow):
         existing = next((item for item in self.recent_links if item.get("url") == url), None)
 
         if not clean_title:
-            # 1. Prefer existing recent title if it has a real root folder name
             if existing and existing.get("title") and existing.get("title").strip().lower() not in junk_titles:
                 clean_title = existing.get("title").strip()
-            # 2. Check current_root_name on MainWindow
             elif hasattr(self, "current_root_name") and self.current_root_name and self.current_root_name.strip().lower() not in junk_titles:
                 clean_title = self.current_root_name.strip()
-            # 3. Check tree widget top item
             elif hasattr(self, "tree_widget") and self.tree_widget.topLevelItemCount() > 0:
                 top = self.tree_widget.topLevelItem(0)
                 if top and top.data(0, Qt.ItemDataRole.UserRole) is not None:
                     raw = top.data(3, Qt.ItemDataRole.UserRole) or ""
                     if raw and raw.strip().lower() not in junk_titles:
                         clean_title = raw.strip()
-            # 4. Try extracting folder name from URL path
             if not clean_title:
                 clean_title = extract_folder_name_from_url(url)
-            # 5. Fallback
             if not clean_title:
                 clean_title = "Dropbox Folder"
 
@@ -906,30 +1789,31 @@ class MainWindow(QMainWindow):
         self.save_settings()
         self.update_recent_links_ui()
 
-    def update_recent_links_ui(self):
-        if (
-            not hasattr(self, "recent_chips_layout")
-            or not hasattr(self, "recent_chips_container")
-            or self.recent_chips_layout is None
-            or self.recent_chips_container is None
-        ):
+    def _clear_layout(self, layout):
+        if layout is None:
             return
-
-        while self.recent_chips_layout.count():
-            child = self.recent_chips_layout.takeAt(0)
+        while layout.count():
+            child = layout.takeAt(0)
             if child is not None:
                 w = child.widget()
                 if w is not None:
                     w.deleteLater()
 
-        if not self.recent_links:
-            self.recent_chips_container.setVisible(False)
+    def update_recent_links_ui(self):
+        if not hasattr(self, "recent_chips_layout") or not hasattr(self, "recent_rows_layout"):
             return
 
-        lbl = QLabel("Recent:")
-        lbl.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 600; padding-right: 2px;")
-        self.recent_chips_layout.addWidget(lbl)
+        self._clear_layout(self.recent_chips_layout)
+        self._clear_layout(self.recent_rows_layout)
 
+        if not self.recent_links:
+            self.recent_chips_container.setVisible(False)
+            empty_lbl = QLabel("Your recently opened Dropbox folders will appear here for 1-click access.")
+            empty_lbl.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent; padding: 6px 0px;")
+            self.recent_rows_layout.addWidget(empty_lbl)
+            return
+
+        # 1. Quick Recent Chips Row
         for item in self.recent_links[:4]:
             title = item.get("title") or "Dropbox Folder"
             display_name = (title[:22] + "…") if len(title) > 24 else title
@@ -937,25 +1821,37 @@ class MainWindow(QMainWindow):
             chip_btn = QPushButton(f"📁 {display_name}")
             chip_btn.setProperty("class", "recent-chip")
             chip_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            tooltip_txt = f"📁 Root Folder: {title}\n🔗 {item.get('url', '')}\n📅 Saved: {item.get('date_str', '')}"
+            tooltip_txt = f"📁 {title}\n🔗 {item.get('url', '')}\n📅 Saved: {item.get('date_str', '')}"
             if item.get("item_count"):
-                tooltip_txt += f"\n📊 {item.get('item_count')} items discovered"
+                tooltip_txt += f"\n📊 {item.get('item_count')} items"
             chip_btn.setToolTip(tooltip_txt)
 
             chip_url = item.get("url", "")
             chip_btn.clicked.connect(lambda _, u=chip_url: self.load_recent_link(u))
             self.recent_chips_layout.addWidget(chip_btn)
 
-        if len(self.recent_links) > 4:
-            more_btn = QPushButton(f"⋯ All ({len(self.recent_links)})")
-            more_btn.setProperty("class", "recent-chip")
-            more_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            more_btn.setToolTip("View all recent links in dropdown")
-            more_btn.clicked.connect(self.show_recent_links_menu)
-            self.recent_chips_layout.addWidget(more_btn)
-
         self.recent_chips_layout.addStretch()
         self.recent_chips_container.setVisible(True)
+
+        # 2. Detailed Recent Rows (top 3)
+        for item in self.recent_links[:3]:
+            title = item.get("title") or "Dropbox Folder"
+            url = item.get("url", "")
+            cnt = item.get("item_count")
+            meta_parts = []
+            if cnt:
+                meta_parts.append(f"{cnt} items")
+            if item.get("date_str"):
+                meta_parts.append(item.get("date_str"))
+            meta_suffix = f"  •  {' • '.join(meta_parts)}" if meta_parts else ""
+            short_url = url if len(url) <= 68 else (url[:65] + "...")
+
+            row_btn = QPushButton(f"📂  {title}{meta_suffix}\n      {short_url}     → Open")
+            row_btn.setProperty("class", "recent-row-btn")
+            row_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            row_btn.setToolTip(url)
+            row_btn.clicked.connect(lambda _, u=url: self.load_recent_link(u))
+            self.recent_rows_layout.addWidget(row_btn)
 
     def show_recent_links_menu(self):
         if not self.is_logged_in():
@@ -1020,7 +1916,13 @@ class MainWindow(QMainWindow):
         if confirmed:
             self.login_with_dropbox()
 
+    # ==========================================================================
+    # Settings Persistence & Worker Cleanup
+    # ==========================================================================
     def load_settings(self):
+        saved_theme = str(self.settings.value("theme_mode", "light")).strip().lower()
+        self.apply_theme(saved_theme if saved_theme in ("light", "dark") else "light", save=False)
+
         saved_dest = str(self.settings.value("destination", str(Path.home() / "Downloads")))
         if saved_dest:
             self.destination_input.setText(saved_dest)
@@ -1028,13 +1930,12 @@ class MainWindow(QMainWindow):
         skip_raw = self.settings.value("skip_existing", True)
         self.check_skip_existing.setChecked(str(skip_raw).lower() in ("true", "1"))
 
-        if hasattr(self, "check_verify_integrity"):
-            verify_raw = self.settings.value("verify_integrity", True)
-            self.check_verify_integrity.setChecked(str(verify_raw).lower() in ("true", "1"))
+        verify_raw = self.settings.value("verify_integrity", True)
+        self.check_verify_integrity.setChecked(str(verify_raw).lower() in ("true", "1"))
+        self._on_verify_setting_changed()
 
-        if hasattr(self, "check_auto_repair"):
-            repair_raw = self.settings.value("auto_repair", True)
-            self.check_auto_repair.setChecked(str(repair_raw).lower() in ("true", "1"))
+        repair_raw = self.settings.value("auto_repair", True)
+        self.check_auto_repair.setChecked(str(repair_raw).lower() in ("true", "1"))
 
         recent_raw = self.settings.value("recent_links_json", "")
         if recent_raw:
@@ -1071,7 +1972,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(400, self.verify_saved_session)
         else:
             self.update_account_ui()
-            self.add_log("🔒 Welcome! Please sign into your Dropbox account above to unlock features.")
+            self.add_log("🔒 Welcome! Please sign into your Dropbox account to unlock features.")
 
     def cleanup_auth_thread(self):
         if self.auth_worker is not None:
@@ -1207,13 +2108,11 @@ class MainWindow(QMainWindow):
         t.start()
 
     def save_settings(self):
+        self.settings.setValue("theme_mode", self.theme_mode)
         self.settings.setValue("destination", self.destination_input.text().strip())
-        if hasattr(self, "check_skip_existing"):
-            self.settings.setValue("skip_existing", self.check_skip_existing.isChecked())
-        if hasattr(self, "check_verify_integrity"):
-            self.settings.setValue("verify_integrity", self.check_verify_integrity.isChecked())
-        if hasattr(self, "check_auto_repair"):
-            self.settings.setValue("auto_repair", self.check_auto_repair.isChecked())
+        self.settings.setValue("skip_existing", self.check_skip_existing.isChecked())
+        self.settings.setValue("verify_integrity", self.check_verify_integrity.isChecked())
+        self.settings.setValue("auto_repair", self.check_auto_repair.isChecked())
 
         if self.current_refresh_token:
             self.settings.setValue("oauth_refresh_token", self.current_refresh_token)
@@ -1286,7 +2185,6 @@ class MainWindow(QMainWindow):
             if not ok or not code:
                 return
 
-            # Show modern loader dialog immediately
             loading_dialog = ModernLoadingDialog(
                 parent=self,
                 title="Connecting to Dropbox",
@@ -1335,6 +2233,10 @@ class MainWindow(QMainWindow):
 
             loading_dialog.exec()
 
+            self.btn_oauth_login.setEnabled(True)
+            self.btn_banner_login.setEnabled(True)
+            self.btn_banner_login.setText("🌐  Log In to Dropbox")
+
             if loading_dialog.auth_success:
                 self.current_access_token = loading_dialog.auth_data.get("access_token", "")
                 self.current_refresh_token = loading_dialog.auth_data.get("refresh_token", "")
@@ -1373,6 +2275,9 @@ class MainWindow(QMainWindow):
                 self.update_account_ui()
 
         except Exception as exc:
+            self.btn_oauth_login.setEnabled(True)
+            self.btn_banner_login.setEnabled(True)
+            self.btn_banner_login.setText("🌐  Log In to Dropbox")
             self.update_account_ui()
             title, friendly = parse_friendly_error(exc)
             ModernMessageBox.error(
@@ -1404,10 +2309,12 @@ class MainWindow(QMainWindow):
             self.settings.remove("token")
             self.clear_url_and_tree()
             self.update_account_ui()
+            self.close_settings_drawer()
+            self.go_to_step(0)
             self.add_log("🔒 Logged out of Dropbox account. All features are now disabled.")
 
     def toggle_log_visibility(self):
-        if self.log_box.isVisible():
+        if not self.log_box.isHidden():
             self.log_box.setVisible(False)
             self.btn_toggle_log.setText("Show Log")
         else:
@@ -1420,12 +2327,12 @@ class MainWindow(QMainWindow):
         if not self.is_logged_in():
             placeholder = QTreeWidgetItem(
                 self.tree_widget,
-                ["🔒 Please log in to Dropbox above to inspect and download folders", "—", "—"]
+                ["🔒 Please log in to Dropbox to inspect and download folders", "—", "—"],
             )
         else:
             placeholder = QTreeWidgetItem(
                 self.tree_widget,
-                ["Paste a Dropbox link above and click '🔍 Load Folders'", "—", "—"]
+                ["Paste a Dropbox link in Step 1 and click 'Load Folders →'", "—", "—"],
             )
         placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
         placeholder.setForeground(0, QColor("#64748b"))
@@ -1461,12 +2368,19 @@ class MainWindow(QMainWindow):
     def clear_url_and_tree(self):
         self.url_input.clear()
         self.link_password = ""
+        self.current_root_name = ""
+        self._tree_items_data = []
+        self._scanned_url = ""
+        self.step2_folder_label.setText("📂 Shared Folder")
+        self.btn_step_2.setText("2. Select Files")
         self.show_empty_tree_placeholder()
+        self.rebuild_queue_from_selection()
         if self.is_logged_in():
-            self.selection_summary_label.setText("(Paste link above to inspect folders)")
+            self.set_selection_summary("(Paste link in Step 1 to inspect folders)", "neutral")
         else:
-            self.selection_summary_label.setText("(Sign in required)")
+            self.set_selection_summary("(Sign in required)", "neutral")
         self.update_download_button_state()
+        self.go_to_step(0)
 
     def browse_destination(self):
         folder = QFileDialog.getExistingDirectory(
@@ -1477,6 +2391,8 @@ class MainWindow(QMainWindow):
         if folder:
             self.destination_input.setText(folder)
             self.save_settings()
+            if not self._is_running:
+                self.rebuild_queue_from_selection()
 
     def open_destination_folder(self):
         dest = self.destination_input.text().strip()
@@ -1504,7 +2420,9 @@ class MainWindow(QMainWindow):
         password = (self.link_password or "").strip()
 
         if not url:
-            ModernMessageBox.warning(self, "Missing Link", "Please enter or paste a valid Dropbox shared link to inspect folders.")
+            ModernMessageBox.warning(
+                self, "Missing Link", "Please enter or paste a valid Dropbox shared link to inspect folders."
+            )
             self.url_input.setFocus()
             return
 
@@ -1562,9 +2480,10 @@ class MainWindow(QMainWindow):
         self.scan_thread = None
         self.scan_worker = None
         self.btn_scan_url.setEnabled(True)
-        self.btn_scan_url.setText("🔍 Load Folders")
+        self.btn_scan_url.setText("Load Folders →")
 
         self.current_root_name = root_name
+        self.step2_folder_label.setText(f"📂 {root_name}")
         self._tree_items_data = entries
         url = self.url_input.text().strip()
         self._scanned_url = url
@@ -1574,18 +2493,22 @@ class MainWindow(QMainWindow):
         files_count = sum(1 for e in entries if not e.get("is_dir"))
         total_size = sum(e.get("size", 0) for e in entries if not e.get("is_dir"))
 
-        self.add_log(f"✓ Found {len(entries)} items ({folders_count} folder(s), {files_count} file(s), {format_bytes(total_size)})")
+        self.add_log(
+            f"✓ Found {len(entries)} items ({folders_count} folder(s), {files_count} file(s), {format_bytes(total_size)})"
+        )
         self.update_selection_summary()
-        url = self.url_input.text().strip()
         self.add_recent_link(url, title=root_name, item_count=len(entries))
         self.update_feature_enabled_state()
         self.update_download_button_state()
+
+        # Automatically advance to Step 2 (Select Files)
+        self.go_to_step(1)
 
     def on_scan_failed(self, error: str):
         self.scan_thread = None
         self.scan_worker = None
         self.btn_scan_url.setEnabled(True)
-        self.btn_scan_url.setText("🔍 Load Folders")
+        self.btn_scan_url.setText("Load Folders →")
 
         title, friendly_msg = parse_friendly_error(error)
         self.show_empty_tree_placeholder()
@@ -1625,7 +2548,6 @@ class MainWindow(QMainWindow):
                 is_dir = node_data["is_dir"]
                 size: int = int(node_data.get("size") or 0)
                 total_size: int = int(node_data.get("total_size") or size)
-                children_count = len(node_data.get("children", {}))
 
                 if is_dir:
                     icon_str = "📁 "
@@ -1660,14 +2582,14 @@ class MainWindow(QMainWindow):
 
                 for child_name, child_data in sorted(
                     node_data["children"].items(),
-                    key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
+                    key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0])),
                 ):
                     add_item_recursive(item, child_data)
 
             if tree_dict["children"]:
                 for child_name, child_data in sorted(
                     tree_dict["children"].items(),
-                    key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0]))
+                    key=lambda x: (not x[1]["is_dir"], natural_sort_key(x[0])),
                 ):
                     add_item_recursive(None, child_data)
             else:
@@ -1787,7 +2709,11 @@ class MainWindow(QMainWindow):
             rect = self.tree_widget.visualItemRect(item)
             if column != 0 or pos.x() > (rect.x() + 24):
                 current_state = item.checkState(0)
-                new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
+                new_state = (
+                    Qt.CheckState.Unchecked
+                    if current_state == Qt.CheckState.Checked
+                    else Qt.CheckState.Checked
+                )
                 item.setCheckState(0, new_state)
 
     def show_tree_context_menu(self, point):
@@ -1796,30 +2722,6 @@ class MainWindow(QMainWindow):
             return
 
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #0c1424;
-                border: 1px solid #1e2d4a;
-                border-radius: 8px;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 6px 20px;
-                color: #e2e8f0;
-                font-size: 12px;
-                font-weight: 500;
-            }
-            QMenu::item:selected {
-                background-color: #0284c7;
-                color: #ffffff;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #1e293b;
-                margin: 4px 8px;
-            }
-        """)
-
         selected_items = self.tree_widget.selectedItems()
         is_multi = len(selected_items) > 1 and item in selected_items
 
@@ -1838,7 +2740,7 @@ class MainWindow(QMainWindow):
 
         if not is_dir:
             act_only = menu.addAction(f"🎯 Select Only '{raw_name}'")
-            is_checked = (item.checkState(0) == Qt.CheckState.Checked)
+            is_checked = item.checkState(0) == Qt.CheckState.Checked
             act_toggle = menu.addAction(f"☐ Deselect '{raw_name}'" if is_checked else f"☑ Select '{raw_name}'")
             menu.addSeparator()
             act_select_all = menu.addAction("☑ Select All")
@@ -1917,18 +2819,19 @@ class MainWindow(QMainWindow):
         if not current:
             return
         is_dir = bool(current.data(1, Qt.ItemDataRole.UserRole))
-        raw_name = current.data(3, Qt.ItemDataRole.UserRole) or current.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "")
+        raw_name = (
+            current.data(3, Qt.ItemDataRole.UserRole)
+            or current.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "")
+        )
         if is_dir:
             child_count = current.childCount()
             size = int(current.data(2, Qt.ItemDataRole.UserRole) or 0)
             size_str = f" • {format_bytes(size)}" if size > 0 else ""
             status = "open — click to collapse" if current.isExpanded() else "closed — click to expand"
             self.tree_hint.setText(f"📁 Folder: {raw_name} ({child_count} items{size_str}) [{status}]")
-            self.tree_hint.setStyleSheet("font-size: 11px; color: #38bdf8; font-weight: 500;")
         else:
             size = int(current.data(2, Qt.ItemDataRole.UserRole) or 0)
             self.tree_hint.setText(f"📄 File: {raw_name} ({format_bytes(size) if size > 0 else '0 B'})")
-            self.tree_hint.setStyleSheet("font-size: 11px; color: #94a3b8;")
 
     def on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
         if column != 0 or self._updating_tree:
@@ -2033,21 +2936,21 @@ class MainWindow(QMainWindow):
             count_recursive(self.tree_widget.topLevelItem(i))
 
         if total_files == 0 and total_folders == 0:
-            self.selection_summary_label.setText("(No items scanned yet)")
-            self.selection_summary_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            self.set_selection_summary("(No items scanned yet)", "neutral")
+            self.btn_step_2.setText("2. Select Files")
         elif total_files == 0:
             folder_str = f"{selected_folders} of {total_folders} folder{'s' if total_folders != 1 else ''} selected"
-            self.selection_summary_label.setText(folder_str)
-            color = "#10b981" if selected_folders > 0 else "#94a3b8"
-            self.selection_summary_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")
+            self.set_selection_summary(folder_str, "success" if selected_folders > 0 else "neutral")
+            self.btn_step_2.setText(f"2. Select Files ({selected_folders})")
         else:
-            folder_str = f" ({selected_folders} folder{'s' if selected_folders != 1 else ''})" if selected_folders > 0 else ""
-            summary_txt = f"{selected_files} of {total_files} file{'s' if total_files != 1 else ''} selected{folder_str}"
+            summary_txt = f"{selected_files} of {total_files} file{'s' if total_files != 1 else ''} selected"
             if selected_bytes > 0:
                 summary_txt += f" • {format_bytes(selected_bytes)}"
-            self.selection_summary_label.setText(summary_txt)
-            color = "#10b981" if selected_files > 0 or selected_folders > 0 else "#94a3b8"
-            self.selection_summary_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")
+            self.set_selection_summary(summary_txt, "success" if selected_files > 0 else "neutral")
+            self.btn_step_2.setText(f"2. Select Files ({selected_files})")
+
+        if not self._is_running:
+            self.rebuild_queue_from_selection()
 
         self.update_download_button_state()
 
@@ -2058,7 +2961,9 @@ class MainWindow(QMainWindow):
         deselected_folders = set()
         total_files = 0
         total_selected_files = 0
+        selected_bytes = 0
         has_tree_items = False
+
         for i in range(self.tree_widget.topLevelItemCount()):
             top_item = self.tree_widget.topLevelItem(i)
             if top_item is not None and top_item.data(0, Qt.ItemDataRole.UserRole) is not None:
@@ -2066,12 +2971,16 @@ class MainWindow(QMainWindow):
                 break
 
         def traverse(item: QTreeWidgetItem | None, parent_path=""):
-            nonlocal total_files, total_selected_files
+            nonlocal total_files, total_selected_files, selected_bytes
             if item is None or item.data(0, Qt.ItemDataRole.UserRole) is None:
                 return
             is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
-            raw_name = item.data(3, Qt.ItemDataRole.UserRole) or item.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "").strip()
+            raw_name = (
+                item.data(3, Qt.ItemDataRole.UserRole)
+                or item.text(0).replace("📁 ", "").replace("📂 ", "").replace("📄 ", "").strip()
+            )
             item_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
+            size = int(item.data(2, Qt.ItemDataRole.UserRole) or 0)
 
             current_path = f"{parent_path}/{raw_name}".strip("/") if parent_path else raw_name
             state = item.checkState(0)
@@ -2092,6 +3001,7 @@ class MainWindow(QMainWindow):
                 total_files += 1
                 if state == Qt.CheckState.Checked:
                     total_selected_files += 1
+                    selected_bytes += size
                     if item_path:
                         selected_files.add(item_path)
                     selected_files.add(current_path)
@@ -2103,7 +3013,6 @@ class MainWindow(QMainWindow):
         for i in range(self.tree_widget.topLevelItemCount()):
             traverse(self.tree_widget.topLevelItem(i))
 
-        # Check if exactly 1 folder hierarchy is selected in tree
         checked_top_folders = []
         checked_top_files = []
         partially_checked_folders = []
@@ -2169,14 +3078,16 @@ class MainWindow(QMainWindow):
             "single_selected_folder": single_selected_folder,
             "total_files": total_files,
             "selected_file_count": total_selected_files,
+            "selected_bytes": selected_bytes,
             "has_tree_items": has_tree_items,
         }
 
     # ==========================================================================
-    # Download Execution
+    # Activity Logging, Download Execution & Live Transfer Telemetry
     # ==========================================================================
     @Slot(str)
     def add_log(self, text: str):
+        self._update_queue_from_log(text)
         timestamp = time.strftime("%H:%M:%S")
         formatted = f"[{timestamp}] {text}"
         self.all_log_lines.append(formatted)
@@ -2209,27 +3120,23 @@ class MainWindow(QMainWindow):
         self._is_running = running
         self.btn_oauth_login.setEnabled(not running)
         self.btn_logout.setEnabled(not running)
-        if hasattr(self, "btn_verify_files"):
-            self.btn_verify_files.setEnabled(not running)
+        self.btn_verify_files.setEnabled(not running)
         self.update_feature_enabled_state()
 
         if running:
-            if hasattr(self, "realtime_stats_timer"):
-                self.realtime_stats_timer.start()
+            self.realtime_stats_timer.start()
             curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
             if "verifying" not in curr.lower():
                 self.set_status_badge("● Downloading...", "running")
         else:
-            if hasattr(self, "realtime_stats_timer"):
-                self.realtime_stats_timer.stop()
+            self.realtime_stats_timer.stop()
             self.tick_realtime_stats()
             curr = self.status_badge.text() if hasattr(self, "status_badge") else ""
-            if not any(k in curr.lower() for k in ("completed", "warning", "error")):
+            if not any(k in curr.lower() for k in ("completed", "warning", "error", "stopped")):
                 if self.is_logged_in():
                     self.set_status_badge("● Ready", "ready")
                 else:
                     self.set_status_badge("○ Login Required", "neutral")
-
 
     def start_download(self):
         if not self.is_logged_in():
@@ -2239,17 +3146,23 @@ class MainWindow(QMainWindow):
         url = self.url_input.text().strip()
         destination = self.destination_input.text().strip()
         skip_existing = self.check_skip_existing.isChecked()
-        verify_integrity = self.check_verify_integrity.isChecked() if hasattr(self, "check_verify_integrity") else True
-        auto_repair = self.check_auto_repair.isChecked() if hasattr(self, "check_auto_repair") else True
+        verify_integrity = self.check_verify_integrity.isChecked()
+        auto_repair = self.check_auto_repair.isChecked()
         link_password = (self.link_password or "").strip()
 
         if not url:
-            ModernMessageBox.warning(self, "Missing Link", "Please enter or paste a Dropbox shared link before downloading.")
+            ModernMessageBox.warning(
+                self, "Missing Link", "Please enter or paste a Dropbox shared link before downloading."
+            )
+            self.go_to_step(0)
             self.url_input.setFocus()
             return
 
         if not destination:
-            ModernMessageBox.warning(self, "Missing Destination", "Please choose a local save destination folder before downloading.")
+            ModernMessageBox.warning(
+                self, "Missing Destination", "Please choose a local save destination folder in ⚙️ Settings."
+            )
+            self.open_settings_drawer()
             return
 
         info = self.get_tree_selection_info()
@@ -2272,6 +3185,8 @@ class MainWindow(QMainWindow):
                 return
 
         self.save_settings()
+        self.close_settings_drawer()
+
         root_name = getattr(self, "current_root_name", "")
         if not root_name and self.tree_widget.topLevelItemCount() > 0:
             top = self.tree_widget.topLevelItem(0)
@@ -2279,6 +3194,7 @@ class MainWindow(QMainWindow):
                 root_name = top.data(3, Qt.ItemDataRole.UserRole) or ""
         self.add_recent_link(url, title=root_name, item_count=info.get("selected_file_count", 0))
 
+        self.rebuild_queue_from_selection()
         self.file_progress.setValue(0)
         self.overall_progress.setValue(0)
         self.file_pct_label.setText("0%")
@@ -2286,28 +3202,25 @@ class MainWindow(QMainWindow):
         self.folder_label.setText("Initializing...")
         self.file_label.setText("Connecting to Dropbox API...")
         self.val_speed.setText("0 B/s")
-        self.val_data.setText("0 B")
-        self.val_files.setText("0 files")
         self.val_time.setText("00:00")
+        self.val_eta.setText("")
 
         self.is_download_paused = False
         self.pause_button.setText("⏸  Pause Download")
         self.pause_button.setProperty("class", "btn-pause")
-        st = self.pause_button.style()
-        if st is not None:
-            st.unpolish(self.pause_button)
-            st.polish(self.pause_button)
+        self._repolish(self.pause_button)
 
         self.set_running(True)
+        self.go_to_step(2)
+
         self.add_log("▶ Starting selective download via Dropbox API...")
         if info["has_tree_items"] and info["total_files"] > 0:
-            self.add_log(f"📋 Selection: {info['selected_file_count']} of {info['total_files']} files selected for download.")
+            self.add_log(
+                f"📋 Selection: {info['selected_file_count']} of {info['total_files']} files selected for download."
+            )
 
         scanned_entries = None
-        if (
-            getattr(self, "_tree_items_data", None)
-            and getattr(self, "_scanned_url", None) == url
-        ):
+        if getattr(self, "_tree_items_data", None) and getattr(self, "_scanned_url", None) == url:
             scanned_entries = self._tree_items_data
 
         self.cleanup_download_thread()
@@ -2354,7 +3267,7 @@ class MainWindow(QMainWindow):
 
         w.log.connect(self.add_log)
         w.folder_changed.connect(self.folder_label.setText)
-        w.file_changed.connect(self.file_label.setText)
+        w.file_changed.connect(self._on_worker_file_changed)
         w.current_progress.connect(self.update_file_progress)
         w.overall_progress.connect(self.update_overall_progress)
         w.stats_changed.connect(self.update_stats)
@@ -2375,12 +3288,18 @@ class MainWindow(QMainWindow):
         link_password = (self.link_password or "").strip()
 
         if not url:
-            ModernMessageBox.warning(self, "Missing Link", "Please enter or paste a Dropbox shared link before verifying.")
+            ModernMessageBox.warning(
+                self, "Missing Link", "Please enter or paste a Dropbox shared link before verifying."
+            )
+            self.go_to_step(0)
             self.url_input.setFocus()
             return
 
         if not destination:
-            ModernMessageBox.warning(self, "Missing Destination", "Please choose a local save destination folder before verifying.")
+            ModernMessageBox.warning(
+                self, "Missing Destination", "Please choose a local save destination folder in ⚙️ Settings."
+            )
+            self.open_settings_drawer()
             return
 
         info = self.get_tree_selection_info()
@@ -2388,9 +3307,12 @@ class MainWindow(QMainWindow):
             ModernMessageBox.warning(
                 self,
                 "No Files Selected",
-                "Please select at least one file or folder from the tree above to verify."
+                "Please select at least one file or folder from the tree to verify.",
             )
             return
+
+        self.close_settings_drawer()
+        self.rebuild_queue_from_selection()
 
         self.file_progress.setValue(0)
         self.overall_progress.setValue(0)
@@ -2399,29 +3321,23 @@ class MainWindow(QMainWindow):
         self.folder_label.setText("Verifying Files...")
         self.file_label.setText("Connecting to Dropbox API to check metadata...")
         self.val_speed.setText("0 B/s")
-        self.val_data.setText("0 B")
-        self.val_files.setText("0 files")
         self.val_time.setText("00:00")
+        self.val_eta.setText("")
 
         self.is_download_paused = False
         self.pause_button.setText("⏸  Pause")
         self.pause_button.setProperty("class", "btn-pause")
-        st = self.pause_button.style()
-        if st is not None:
-            st.unpolish(self.pause_button)
-            st.polish(self.pause_button)
+        self._repolish(self.pause_button)
 
         self.set_running(True)
         self.set_status_badge("● Verifying...", "verifying")
+        self.go_to_step(2)
         self.add_log("🔍 Starting on-demand file integrity verification...")
 
-        auto_repair = self.check_auto_repair.isChecked() if hasattr(self, "check_auto_repair") else True
+        auto_repair = self.check_auto_repair.isChecked()
 
         scanned_entries = None
-        if (
-            getattr(self, "_tree_items_data", None)
-            and getattr(self, "_scanned_url", None) == url
-        ):
+        if getattr(self, "_tree_items_data", None) and getattr(self, "_scanned_url", None) == url:
             scanned_entries = self._tree_items_data
 
         self.cleanup_download_thread()
@@ -2468,7 +3384,7 @@ class MainWindow(QMainWindow):
 
         w.log.connect(self.add_log)
         w.folder_changed.connect(self.folder_label.setText)
-        w.file_changed.connect(self.file_label.setText)
+        w.file_changed.connect(self._on_worker_file_changed)
         w.current_progress.connect(self.update_file_progress)
         w.overall_progress.connect(self.update_overall_progress)
         w.stats_changed.connect(self.update_stats)
@@ -2479,9 +3395,19 @@ class MainWindow(QMainWindow):
 
         t.start()
 
+    @Slot(str)
+    def _on_worker_file_changed(self, text: str):
+        self.file_label.setText(text)
+        if text.startswith("🔍 Verifying file") and self._active_queue_key:
+            self._set_queue_item_status(self._active_queue_key, "verifying")
+
     def update_file_progress(self, val: int):
         self.file_progress.setValue(val)
         self.file_pct_label.setText(f"{val}%")
+        if self._active_queue_key and self._active_queue_key in self._queue_records:
+            cur_status = self._queue_records[self._active_queue_key]["status"]
+            if cur_status in ("downloading", "verifying"):
+                self._set_queue_item_status(self._active_queue_key, cur_status, progress=val)
 
     def update_overall_progress(self, val: int):
         self.overall_progress.setValue(val)
@@ -2490,12 +3416,15 @@ class MainWindow(QMainWindow):
     def update_stats(self, stats: dict):
         if "speed" in stats:
             self.val_speed.setText(stats["speed"])
-        if "data" in stats:
-            self.val_data.setText(stats["data"])
-        if "files" in stats:
-            self.val_files.setText(stats["files"])
         if "elapsed" in stats:
             self.val_time.setText(stats["elapsed"])
+        if self.worker is not None:
+            self._refresh_queue_counts_and_cards()
+        else:
+            if "data" in stats:
+                self.val_data.setText(f"{stats['data']} saved to disk")
+            if "files" in stats:
+                self.val_files.setText(stats["files"])
 
     def tick_realtime_stats(self):
         if self.worker and is_thread_running(self.download_thread):
@@ -2503,7 +3432,6 @@ class MainWindow(QMainWindow):
                 self.worker.emit_stats(force=True)
             except Exception:
                 pass
-
 
     def stop_download(self):
         if self.worker:
@@ -2529,6 +3457,11 @@ class MainWindow(QMainWindow):
             self.folder_label.setText("Stopped")
             self.file_label.setText("Operation stopped by user")
             self.val_speed.setText("0 B/s")
+            self.val_eta.setText("")
+            if self._active_queue_key and self._active_queue_key in self._queue_records:
+                if not self._is_completed_status(self._queue_records[self._active_queue_key]["status"]):
+                    self._set_queue_item_status(self._active_queue_key, "queued")
+                self._active_queue_key = ""
             ModernMessageBox.information(self, "Operation Stopped", message)
         elif has_corrupted or has_missing or has_errors:
             self.set_status_badge("⚠️ Warnings", "warning")
@@ -2539,6 +3472,7 @@ class MainWindow(QMainWindow):
             self.file_progress.setValue(100)
             self.overall_progress.setValue(100)
             self.val_speed.setText("0 B/s")
+            self.val_eta.setText("")
             ModernMessageBox.warning(self, "Completed with Warnings", message)
         else:
             self.set_status_badge("● Completed", "success")
@@ -2549,6 +3483,8 @@ class MainWindow(QMainWindow):
             self.file_progress.setValue(100)
             self.overall_progress.setValue(100)
             self.val_speed.setText("0 B/s")
+            self.val_eta.setText("")
+            self._refresh_queue_counts_and_cards()
             ModernMessageBox.information(self, "Completed Successfully", message)
 
         self.update_feature_enabled_state()
@@ -2566,6 +3502,7 @@ class MainWindow(QMainWindow):
         self.folder_label.setText(title)
         self.file_label.setText(friendly_msg.splitlines()[0])
         self.val_speed.setText("0 B/s")
+        self.val_eta.setText("")
 
         if "password" in error.lower() or "access_denied" in error.lower():
             pwd, ok = ModernInputDialog.get_text(
@@ -2589,6 +3526,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.save_settings()
+        if hasattr(self, "ad_banner") and self.ad_banner is not None:
+            self.ad_banner.cleanup_feed_thread()
         self.cleanup_download_thread()
         self.cleanup_scan_thread()
         self.cleanup_auth_thread()
@@ -2609,4 +3548,3 @@ class MainWindow(QMainWindow):
                         pass
 
         event.accept()
-
