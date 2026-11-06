@@ -9,6 +9,7 @@ from typing import Any
 
 try:
     from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     load_dotenv()
 except ImportError:
     pass
@@ -187,8 +188,10 @@ class MainWindow(QMainWindow):
         self.current_refresh_token: str = ""
         self.current_user_name: str = ""
         self.current_user_email: str = ""
+        self.custom_app_key: str = ""
         self.link_password: str = ""
         self.recent_links: list[dict[str, Any]] = []
+        self._loading_settings: bool = False
         self.is_download_paused: bool = False
         self._is_running: bool = False
         self.current_root_name: str = ""
@@ -248,6 +251,7 @@ class MainWindow(QMainWindow):
         self._refresh_all_queue_item_styles()
         if save:
             self.settings.setValue("theme_mode", self.theme_mode)
+            self.settings.sync()
 
     def toggle_theme(self):
         next_mode = "dark" if self.theme_mode == "light" else "light"
@@ -1114,6 +1118,7 @@ class MainWindow(QMainWindow):
         self.destination_input.setText(str(Path.home() / "Downloads"))
         self.destination_input.setPlaceholderText("Select local folder to save files...")
         self.destination_input.textChanged.connect(self._on_destination_changed)
+        self.destination_input.editingFinished.connect(self.save_settings)
 
         self.btn_browse = QPushButton("Browse")
         self.btn_browse.setProperty("class", "drawer-card-btn")
@@ -1339,8 +1344,7 @@ class MainWindow(QMainWindow):
             self.dest_summary_label.setText(f"Saving to: {short_dest}")
             self.dest_summary_label.setToolTip(dest_str)
 
-    def _on_verify_setting_changed(self):
-        self.save_settings()
+    def _update_verify_integrity_badge(self):
         if hasattr(self, "lbl_integrity_badge"):
             if self.check_verify_integrity.isChecked():
                 self.lbl_integrity_badge.setText("SHA-256 Checksum Verified ✓")
@@ -1352,6 +1356,10 @@ class MainWindow(QMainWindow):
                 self.lbl_integrity_badge.setStyleSheet(
                     "font-size: 11px; color: #64748b; font-weight: 600; background-color: transparent;"
                 )
+
+    def _on_verify_setting_changed(self):
+        self._update_verify_integrity_badge()
+        self.save_settings()
 
     def set_queue_filter(self, mode: str):
         if mode not in ("all", "done", "rem"):
@@ -1733,7 +1741,7 @@ class MainWindow(QMainWindow):
     # Account & Feature State Management
     # ==========================================================================
     def get_app_key(self) -> str:
-        return os.getenv("DROPBOX_APP_KEY", "").strip()
+        return os.getenv("DROPBOX_APP_KEY", "").strip() or getattr(self, "custom_app_key", "").strip()
 
     def is_logged_in(self) -> bool:
         return bool(self.current_refresh_token or self.current_access_token)
@@ -2129,59 +2137,75 @@ class MainWindow(QMainWindow):
     # Settings Persistence & Worker Cleanup
     # ==========================================================================
     def load_settings(self):
-        saved_theme = str(self.settings.value("theme_mode", "light")).strip().lower()
-        self.apply_theme(saved_theme if saved_theme in ("light", "dark") else "light", save=False)
+        self._loading_settings = True
+        try:
+            saved_theme = str(self.settings.value("theme_mode", "light")).strip().lower()
+            self.apply_theme(saved_theme if saved_theme in ("light", "dark") else "light", save=False)
 
-        saved_dest = str(self.settings.value("destination", str(Path.home() / "Downloads")))
-        if saved_dest:
-            self.destination_input.setText(saved_dest)
+            saved_dest = str(self.settings.value("destination", str(Path.home() / "Downloads")))
+            if saved_dest:
+                self.destination_input.blockSignals(True)
+                self.destination_input.setText(saved_dest)
+                self.destination_input.blockSignals(False)
+                self._on_destination_changed(saved_dest)
 
-        skip_raw = self.settings.value("skip_existing", True)
-        self.check_skip_existing.setChecked(str(skip_raw).lower() in ("true", "1"))
+            skip_raw = self.settings.value("skip_existing", True)
+            self.check_skip_existing.blockSignals(True)
+            self.check_skip_existing.setChecked(str(skip_raw).strip().lower() in ("true", "1"))
+            self.check_skip_existing.blockSignals(False)
 
-        verify_raw = self.settings.value("verify_integrity", True)
-        self.check_verify_integrity.setChecked(str(verify_raw).lower() in ("true", "1"))
-        self._on_verify_setting_changed()
+            verify_raw = self.settings.value("verify_integrity", True)
+            self.check_verify_integrity.blockSignals(True)
+            self.check_verify_integrity.setChecked(str(verify_raw).strip().lower() in ("true", "1"))
+            self.check_verify_integrity.blockSignals(False)
+            self._update_verify_integrity_badge()
 
-        repair_raw = self.settings.value("auto_repair", True)
-        self.check_auto_repair.setChecked(str(repair_raw).lower() in ("true", "1"))
+            repair_raw = self.settings.value("auto_repair", True)
+            self.check_auto_repair.blockSignals(True)
+            self.check_auto_repair.setChecked(str(repair_raw).strip().lower() in ("true", "1"))
+            self.check_auto_repair.blockSignals(False)
 
-        recent_raw = self.settings.value("recent_links_json", "")
-        if recent_raw:
-            try:
-                loaded = json.loads(str(recent_raw))
-                if isinstance(loaded, list):
-                    junk_titles = {"h", "fo", "fi", "sh", "scl", "dl", ""}
-                    for it in loaded:
-                        t = (it.get("title") or "").strip()
-                        if t.lower() in junk_titles:
-                            it["title"] = extract_folder_name_from_url(it.get("url", "")) or "Dropbox Folder"
-                    self.recent_links = loaded
-                else:
+            self.custom_app_key = str(self.settings.value("app_key", "")).strip()
+
+            recent_raw = self.settings.value("recent_links_json", "")
+            if recent_raw:
+                try:
+                    loaded = json.loads(str(recent_raw))
+                    if isinstance(loaded, list):
+                        junk_titles = {"h", "fo", "fi", "sh", "scl", "dl", ""}
+                        for it in loaded:
+                            t = (it.get("title") or "").strip()
+                            if t.lower() in junk_titles:
+                                it["title"] = extract_folder_name_from_url(it.get("url", "")) or "Dropbox Folder"
+                        self.recent_links = loaded
+                    else:
+                        self.recent_links = []
+                except Exception:
                     self.recent_links = []
-            except Exception:
+            else:
                 self.recent_links = []
-        else:
-            self.recent_links = []
-        self.update_recent_links_ui()
+            self.update_recent_links_ui()
 
-        saved_refresh = str(self.settings.value("oauth_refresh_token", "")).strip()
-        saved_access = str(self.settings.value("oauth_access_token", "")).strip()
-        saved_name = str(self.settings.value("user_name", "")).strip()
-        saved_email = str(self.settings.value("user_email", "")).strip()
+            saved_refresh = str(self.settings.value("oauth_refresh_token", "")).strip()
+            saved_access = str(self.settings.value("oauth_access_token", "")).strip()
+            saved_name = str(self.settings.value("user_name", "")).strip()
+            saved_email = str(self.settings.value("user_email", "")).strip()
 
-        self.settings.remove("token")
+            if self.settings.contains("token"):
+                self.settings.remove("token")
 
-        if saved_refresh or saved_access:
-            self.current_refresh_token = saved_refresh
-            self.current_access_token = saved_access
-            self.current_user_name = saved_name
-            self.current_user_email = saved_email
-            self.update_account_ui()
-            QTimer.singleShot(400, self.verify_saved_session)
-        else:
-            self.update_account_ui()
-            self.add_log("🔒 Welcome! Please sign into your Dropbox account to unlock features.")
+            if saved_refresh or saved_access:
+                self.current_refresh_token = saved_refresh
+                self.current_access_token = saved_access
+                self.current_user_name = saved_name
+                self.current_user_email = saved_email
+                self.update_account_ui()
+                QTimer.singleShot(400, self.verify_saved_session)
+            else:
+                self.update_account_ui()
+                self.add_log("🔒 Welcome! Please sign into your Dropbox account to unlock features.")
+        finally:
+            self._loading_settings = False
 
     def cleanup_auth_thread(self):
         if self.auth_worker is not None:
@@ -2317,11 +2341,19 @@ class MainWindow(QMainWindow):
         t.start()
 
     def save_settings(self):
+        if getattr(self, "_loading_settings", False):
+            return
+
         self.settings.setValue("theme_mode", self.theme_mode)
         self.settings.setValue("destination", self.destination_input.text().strip())
         self.settings.setValue("skip_existing", self.check_skip_existing.isChecked())
         self.settings.setValue("verify_integrity", self.check_verify_integrity.isChecked())
         self.settings.setValue("auto_repair", self.check_auto_repair.isChecked())
+
+        if getattr(self, "custom_app_key", ""):
+            self.settings.setValue("app_key", self.custom_app_key)
+        else:
+            self.settings.remove("app_key")
 
         if self.current_refresh_token:
             self.settings.setValue("oauth_refresh_token", self.current_refresh_token)
@@ -2348,8 +2380,11 @@ class MainWindow(QMainWindow):
         else:
             self.settings.remove("recent_links_json")
 
+        self.settings.sync()
+
     def login_with_dropbox(self):
         app_key = self.get_app_key()
+        entered_custom_key = ""
 
         if not app_key:
             key, ok = ModernInputDialog.get_text(
@@ -2366,7 +2401,8 @@ class MainWindow(QMainWindow):
             )
             if not ok or not key:
                 return
-            app_key = key
+            app_key = key.strip()
+            entered_custom_key = app_key
 
         try:
             flow = dropbox.DropboxOAuth2FlowNoRedirect(
@@ -2447,6 +2483,8 @@ class MainWindow(QMainWindow):
             self.btn_banner_login.setText("🌐  Log In to Dropbox")
 
             if loading_dialog.auth_success:
+                if entered_custom_key:
+                    self.custom_app_key = entered_custom_key
                 self.current_access_token = loading_dialog.auth_data.get("access_token", "")
                 self.current_refresh_token = loading_dialog.auth_data.get("refresh_token", "")
                 self.current_user_name = loading_dialog.auth_data.get("user_name", "")
@@ -2516,6 +2554,7 @@ class MainWindow(QMainWindow):
             self.settings.remove("user_name")
             self.settings.remove("user_email")
             self.settings.remove("token")
+            self.settings.sync()
             self.clear_url_and_tree()
             self.update_account_ui()
             self.close_settings_drawer()

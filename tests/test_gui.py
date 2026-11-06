@@ -315,6 +315,74 @@ class TestMainWindowGUI(unittest.TestCase):
         self.win.btn_dismiss_transfer_notice.click()
         self.assertTrue(self.win.transfer_notice_banner.isHidden())
 
+    def test_settings_account_and_recent_links_persist_across_restarts(self):
+        # Populate account session, recent links, theme, destination, and checkbox settings
+        custom_dest = str(Path(self._tmpdir.name) / "MySavedDownloads")
+        self.win.current_access_token = "persisted_access_tok"
+        self.win.current_refresh_token = "persisted_refresh_tok"
+        self.win.current_user_name = "Jane Doe"
+        self.win.current_user_email = "jane@example.com"
+        self.win.custom_app_key = "custom_client_key_123"
+        self.win.apply_theme("dark", save=True)
+        self.win.destination_input.setText(custom_dest)
+        self.win.check_skip_existing.setChecked(False)
+        self.win.check_verify_integrity.setChecked(False)
+        self.win.check_auto_repair.setChecked(False)
+        self.win.add_recent_link(
+            "https://www.dropbox.com/scl/fo/aaa/Project_Alpha",
+            title="Project_Alpha",
+            item_count=18,
+        )
+        self.win.add_recent_link(
+            "https://www.dropbox.com/scl/fo/bbb/Design_Assets",
+            title="Design_Assets",
+            item_count=7,
+        )
+        self.win.close()
+
+        # Simulate consecutive app restarts against the same QSettings file
+        with patch.object(MainWindow, "verify_saved_session", return_value=None):
+            win2 = MainWindow()
+            try:
+                self.assertTrue(win2.is_logged_in())
+                self.assertEqual(win2.current_access_token, "persisted_access_tok")
+                self.assertEqual(win2.current_refresh_token, "persisted_refresh_tok")
+                self.assertEqual(win2.current_user_name, "Jane Doe")
+                self.assertEqual(win2.current_user_email, "jane@example.com")
+                self.assertEqual(win2.custom_app_key, "custom_client_key_123")
+                self.assertEqual(win2.account_name_label.text(), "jane@example.com")
+                self.assertTrue(win2.login_banner.isHidden())
+                self.assertTrue(win2.url_input.isEnabled())
+
+                self.assertEqual(win2.theme_mode, "dark")
+                self.assertEqual(win2.destination_input.text(), custom_dest)
+                self.assertIn("MySavedDownloads", win2.dest_summary_label.text())
+                self.assertFalse(win2.check_skip_existing.isChecked())
+                self.assertFalse(win2.check_verify_integrity.isChecked())
+                self.assertEqual(win2.lbl_integrity_badge.text(), "Standard Mode (Checksum Off)")
+                self.assertFalse(win2.check_auto_repair.isChecked())
+
+                self.assertEqual(len(win2.recent_links), 2)
+                self.assertEqual(win2.recent_links[0]["title"], "Design_Assets")
+                self.assertEqual(win2.recent_links[1]["title"], "Project_Alpha")
+                self.assertFalse(win2.recent_chips_container.isHidden())
+                self.assertEqual(win2.recent_rows_layout.count(), 2)
+            finally:
+                win2.close()
+
+            # Third restart without touching settings in win2 must still retain everything
+            win3 = MainWindow()
+            try:
+                self.assertTrue(win3.is_logged_in())
+                self.assertEqual(win3.current_refresh_token, "persisted_refresh_tok")
+                self.assertEqual(len(win3.recent_links), 2)
+                self.assertEqual(win3.theme_mode, "dark")
+                self.assertFalse(win3.check_skip_existing.isChecked())
+                self.assertFalse(win3.check_verify_integrity.isChecked())
+                self.assertFalse(win3.check_auto_repair.isChecked())
+            finally:
+                win3.close()
+
 
 if __name__ == "__main__":
     unittest.main()
