@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
-from . import main_window as _mw
-from .utils import extract_folder_name_from_url
+import src.main_window as _mw
+from ..utils import extract_folder_name_from_url
 
 
 class _RecentLinksMixin:

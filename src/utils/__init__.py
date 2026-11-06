@@ -8,7 +8,7 @@ try:
 except ImportError:
     shiboken6 = None
 
-from .utils_dropbox import (
+from .dropbox import (
     DropboxContentHasher,
     resolve_download_root,
     relative_path,

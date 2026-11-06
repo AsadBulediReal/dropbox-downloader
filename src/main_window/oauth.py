@@ -1,7 +1,7 @@
 from PySide6.QtCore import QThread, Qt, QTimer
 
-from . import main_window as _mw
-from .utils import parse_friendly_error, is_thread_running
+import src.main_window as _mw
+from ..utils import parse_friendly_error, is_thread_running
 
 
 class _OAuthMixin:

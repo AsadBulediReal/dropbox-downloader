@@ -1,6 +1,6 @@
 import time
 
-from .utils import (
+from ..utils import (
     create_dropbox_client,
     parse_friendly_error,
     format_bytes,
@@ -16,9 +16,9 @@ from .utils import (
     build_tree_hierarchy,
     is_path_selected,
 )
-from .worker_auth_scan import AuthWorker, SessionVerifyWorker, ScanWorker
-from .worker_collect_mixin import DownloadFileItem
-from .worker_download import DownloadWorker
+from .auth_scan import AuthWorker, SessionVerifyWorker, ScanWorker
+from .collect_mixin import DownloadFileItem
+from .download import DownloadWorker
 
 __all__ = [
     "time",

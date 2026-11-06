@@ -7,7 +7,7 @@ import dropbox
 from dropbox.files import FileMetadata, FolderMetadata, SharedLink
 from dropbox.exceptions import ApiError
 
-from .utils import format_bytes, is_path_selected
+from ..utils import format_bytes, is_path_selected
 
 
 @dataclass

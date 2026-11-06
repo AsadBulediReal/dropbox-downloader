@@ -9,7 +9,7 @@ from typing import Any
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     load_dotenv()
 except ImportError:
     pass
@@ -27,38 +27,38 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 
-from .styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_theme_stylesheet
-from .ads import AdBannerWidget
-from .utils import is_thread_running
-from .workers import (
+from ..styles import DARK_STYLESHEET, LIGHT_STYLESHEET, get_theme_stylesheet
+from ..ads import AdBannerWidget
+from ..utils import is_thread_running
+from ..workers import (
     AuthWorker,
     SessionVerifyWorker,
     ScanWorker,
     DownloadFileItem,
     DownloadWorker,
 )
-from .dialogs import (
+from ..dialogs import (
     ModernMessageBox,
     ModernInputDialog,
     ModernLoadingDialog,
     FileTreeWidget,
 )
-from .mw_widgets_theme import (
+from .widgets_theme import (
     _ClickBackdrop,
     _RecentLinkRow,
     _ThemeBadgesMixin,
 )
-from .mw_ui_drawer import setup_main_window_ui
-from .mw_queue import _QueueMixin
-from .mw_account_state import _AccountStateMixin
-from .mw_recent_links import _RecentLinksMixin
-from .mw_settings_session import _SettingsSessionMixin
-from .mw_oauth import _OAuthMixin
-from .mw_scan_tree import _ScanTreeMixin
-from .mw_tree_interactions import _TreeInteractionsMixin
-from .mw_tree_selection import _TreeSelectionMixin
-from .mw_transfer_start import _TransferStartMixin
-from .mw_transfer_status import _TransferStatusMixin
+from .ui_drawer import setup_main_window_ui
+from .queue import _QueueMixin
+from .account_state import _AccountStateMixin
+from .recent_links import _RecentLinksMixin
+from .settings_session import _SettingsSessionMixin
+from .oauth import _OAuthMixin
+from .scan_tree import _ScanTreeMixin
+from .tree_interactions import _TreeInteractionsMixin
+from .tree_selection import _TreeSelectionMixin
+from .transfer_start import _TransferStartMixin
+from .transfer_status import _TransferStatusMixin
 
 
 class MainWindow(

@@ -3,8 +3,8 @@ import time
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QApplication
 
-from . import main_window as _mw
-from .utils import parse_friendly_error, is_thread_running
+import src.main_window as _mw
+from ..utils import parse_friendly_error, is_thread_running
 
 
 class _TransferStatusMixin:

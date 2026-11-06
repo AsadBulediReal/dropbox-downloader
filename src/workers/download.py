@@ -9,7 +9,7 @@ from dropbox.files import SharedLink
 from dropbox.exceptions import ApiError, AuthError
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from .utils import (
+from ..utils import (
     format_bytes,
     sanitize_filename,
     natural_sort_path_key,
@@ -18,10 +18,10 @@ from .utils import (
     check_single_folder_destination_match,
     relative_path,
 )
-from .worker_collect_mixin import DownloadFileItem, _DownloadCollectMixin
-from .worker_transfer_mixin import _DownloadTransferMixin
-from .worker_verify_mixin import _DownloadVerifyMixin
-from . import workers as _workers_pkg
+from .collect_mixin import DownloadFileItem, _DownloadCollectMixin
+from .transfer_mixin import _DownloadTransferMixin
+from .verify_mixin import _DownloadVerifyMixin
+import src.workers as _workers_pkg
 
 
 class DownloadWorker(QObject, _DownloadCollectMixin, _DownloadTransferMixin, _DownloadVerifyMixin):

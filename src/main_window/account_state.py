@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 
-from .utils import format_bytes, is_thread_running
+from ..utils import format_bytes, is_thread_running
 
 
 class _AccountStateMixin:

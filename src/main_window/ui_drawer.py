@@ -18,10 +18,10 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from .ads import AdBannerWidget
-from .mw_widgets_theme import _ClickBackdrop
-from .mw_ui_steps12 import build_header_bar, build_step1_page, build_step2_page
-from .mw_ui_step3 import build_step3_page
+from ..ads import AdBannerWidget
+from .widgets_theme import _ClickBackdrop
+from .ui_steps12 import build_header_bar, build_step1_page, build_step2_page
+from .ui_step3 import build_step3_page
 
 
 def build_settings_drawer(win: Any):

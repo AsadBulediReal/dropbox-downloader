@@ -2,8 +2,8 @@ from pathlib import Path
 
 import dropbox
 
-from .utils import format_bytes, compute_dropbox_content_hash, safe_local_path
-from .worker_collect_mixin import DownloadFileItem
+from ..utils import format_bytes, compute_dropbox_content_hash, safe_local_path
+from .collect_mixin import DownloadFileItem
 
 
 class _DownloadVerifyMixin:

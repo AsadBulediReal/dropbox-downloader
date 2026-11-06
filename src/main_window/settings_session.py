@@ -3,8 +3,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, QTimer
 
-from . import main_window as _mw
-from .utils import (
+import src.main_window as _mw
+from ..utils import (
     extract_folder_name_from_url,
     parse_friendly_error,
     is_thread_running,

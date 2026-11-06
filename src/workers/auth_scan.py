@@ -7,8 +7,8 @@ from dropbox.files import FileMetadata, FolderMetadata, SharedLink
 from dropbox.exceptions import ApiError, AuthError
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from .utils import sanitize_filename, build_tree_hierarchy
-from . import workers as _workers_pkg
+from ..utils import sanitize_filename, build_tree_hierarchy
+import src.workers as _workers_pkg
 
 
 # ==============================================================================

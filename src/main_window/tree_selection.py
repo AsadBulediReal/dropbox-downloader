@@ -4,7 +4,7 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QTreeWidgetItem
 
-from .utils import (
+from ..utils import (
     format_bytes,
     strip_folder_prefix,
     check_single_folder_destination_match,

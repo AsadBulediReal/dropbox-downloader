@@ -5,14 +5,14 @@ from typing import Any
 
 import dropbox
 
-from .utils import (
+from ..utils import (
     parse_friendly_error,
     format_bytes,
     safe_local_path,
     relative_path,
 )
-from .worker_collect_mixin import DownloadFileItem
-from . import workers as _workers_pkg
+from .collect_mixin import DownloadFileItem
+import src.workers as _workers_pkg
 
 
 class _DownloadTransferMixin:

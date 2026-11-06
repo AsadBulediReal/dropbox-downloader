@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QTreeWidgetItem
 
-from .utils import (
+from ..utils import (
     format_bytes,
     is_thread_running,
     get_file_type_and_icon,

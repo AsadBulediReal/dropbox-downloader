@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
-from .dialogs import FileTreeWidget
+from ..dialogs import FileTreeWidget
 
 
 def build_header_bar(win: Any, root_layout: QVBoxLayout):

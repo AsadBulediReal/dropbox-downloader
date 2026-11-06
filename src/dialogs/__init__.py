@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 
-from .dialogs_loading_tree import _is_light_parent, ModernLoadingDialog, FileTreeWidget
+from .loading_tree import _is_light_parent, ModernLoadingDialog, FileTreeWidget
 
 
 class ModernMessageBox(QDialog):

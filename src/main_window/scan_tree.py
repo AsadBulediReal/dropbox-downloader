@@ -3,8 +3,8 @@ from typing import Any
 from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import QTreeWidgetItem
 
-from . import main_window as _mw
-from .utils import (
+import src.main_window as _mw
+from ..utils import (
     format_bytes,
     parse_friendly_error,
     get_file_type_and_icon,

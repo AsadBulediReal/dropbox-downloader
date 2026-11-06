@@ -4,7 +4,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget, QFrame
 
-from .styles import get_theme_stylesheet
+from ..styles import get_theme_stylesheet
 
 
 class _ClickBackdrop(QFrame):

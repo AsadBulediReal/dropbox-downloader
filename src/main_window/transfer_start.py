@@ -1,6 +1,6 @@
 from PySide6.QtCore import QThread, Qt
 
-from . import main_window as _mw
+import src.main_window as _mw
 
 
 class _TransferStartMixin:
