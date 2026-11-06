@@ -193,6 +193,7 @@ class TestMainWindowGUI(unittest.TestCase):
         self.assertFalse(self.win._queue_tree_items[k2].isHidden())
 
     def test_corner_settings_drawer_and_theme_toggle(self):
+        self.assertEqual(self.win.btn_settings.text(), "⚙️")
         self.assertTrue(self.win.settings_overlay.isHidden())
         self.win.btn_settings.click()
         self.assertFalse(self.win.settings_overlay.isHidden())

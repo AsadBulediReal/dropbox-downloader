@@ -86,9 +86,8 @@ QPushButton.btn-settings, QPushButton[class="btn-settings"] {
     border: 1px solid #e2e8f0;
     border-radius: 12px;
     color: #0f172a;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 8px 15px;
+    font-size: 18px;
+    padding: 0px;
 }
 QPushButton.btn-settings:hover, QPushButton[class="btn-settings"]:hover {
     background-color: #f1f5f9;
@@ -773,9 +772,8 @@ QPushButton.btn-settings, QPushButton[class="btn-settings"] {
     border: 1px solid #334155;
     border-radius: 12px;
     color: #f8fafc;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 8px 15px;
+    font-size: 18px;
+    padding: 0px;
 }
 QPushButton.btn-settings:hover, QPushButton[class="btn-settings"]:hover {
     background-color: #2b3952;

@@ -383,17 +383,16 @@ class MainWindow(QMainWindow):
         pill_layout.addWidget(self.btn_step_1)
         pill_layout.addWidget(self.btn_step_2)
         pill_layout.addWidget(self.btn_step_3)
-        header_layout.addWidget(self.wizard_pill_bar)
+        header_layout.addWidget(self.wizard_pill_bar, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        header_layout.addStretch(1)
-
-        # Corner Settings Button
-        self.btn_settings = QPushButton("⚙️  Settings")
+        # Corner Settings Icon Button (right next to Steps Pill Bar)
+        self.btn_settings = QPushButton("⚙️")
         self.btn_settings.setProperty("class", "btn-settings")
+        self.btn_settings.setFixedSize(38, 38)
         self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_settings.setToolTip("Open download folder, integrity rules, account, theme, and activity log")
+        self.btn_settings.setToolTip("Settings — Open download folder, integrity rules, account, theme, and activity log")
         self.btn_settings.clicked.connect(self.toggle_settings_drawer)
-        header_layout.addWidget(self.btn_settings)
+        header_layout.addWidget(self.btn_settings, 0, Qt.AlignmentFlag.AlignVCenter)
 
         root_layout.addWidget(header_card)
 
