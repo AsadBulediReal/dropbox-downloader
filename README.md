@@ -76,6 +76,26 @@ When you open the app:
 - **Cryptographic File Integrity Verification**: Automatically verifies every downloaded and existing file using Dropbox's official SHA-256 block hash algorithm (`content_hash`) and exact byte counts to detect incomplete, missing, or corrupted files with 100% certainty.
 - **Automatic Corruption Repair**: Automatically deletes corrupted or partially written local files and re-downloads fresh copies from Dropbox, re-verifying to ensure all files on disk are completely intact.
 - **On-Demand File Verification**: A dedicated "🔍 Verify Files" button allows users to verify their local files against Dropbox cloud checksums at any time without having to re-download intact files.
+- **HTTP Range Partial Download Resume**: Tracks partial downloads in persistent `.tmp` files and uses HTTP `Range` requests with chunk flushing and a 4 KB safety rewind buffer so interrupted or stopped transfers continue from their last saved byte offset instead of restarting from `0%`.
+- **Dynamic Queue Re-ordering**: Automatically moves files to the end of the queue (`Queue Pass 1/3..3/3`, persisted via `.download_state.json`) if the server rejects a `Range` request or experiences repeated connection stalls, keeping the rest of the batch moving smoothly.
+- **Real-Time Verification & Finalization Indicators**: Displays live per-file verification progress (`🔍 Verifying file (X%)`), isolated `(Verify)` read-speed metrics, and file finalization (`💾 Finalizing file`) status updates.
+- **Structured Retry & Restart Logging**: Clear `[Attempt X/3]` progress tags across `GET`, `🔄 RESUME`, `🔄 RESTART`, and `⚠️ RETRY` log messages.
+- **Instant Cached Download Start**: Reuses pre-scanned directory tree metadata for instant download startup, with automatic parallel folder discovery fallback.
 - **Dual Progress Bars**: Individual file progress and overall batch progress with 100% completion confirmation.
 - **Activity Log**: Searchable and filterable log console with one-click copy and clear.
 - **Safe & Resilient**: Graceful cancellation, thread lifecycle management, temporary download files (`.tmp`), and path sanitization.
+
+---
+
+## 🧪 Running Unit Tests
+
+Run the automated unit test suite (`tests/`) using Python's built-in `unittest` runner (no extra packages required):
+
+```bash
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+The test suite covers:
+- **`tests/test_utils.py`**: Path sanitization & traversal guards, human-friendly error mapping, single-folder destination matching, natural sorting, tree hierarchy metrics, selection filters, and multi-block Dropbox SHA-256 content hashing.
+- **`tests/test_workers.py`**: OAuth/session workers, parallel folder scanning, HTTP `Range` (`206`) partial resume & 4 KB safety rewind, >30s pause/resume stall protection, `HTTP 416` / `200` fallback, mid-verification stop safety, dynamic queue re-ordering, smart skip, and auto-repair.
+- **`tests/test_gui.py`**: Headless Qt verification of login-gated workspace states, tree controls (`Select All`, `Deselect All`, `Expand All`, `Collapse All`), pause/resume log output, and log filtering.
