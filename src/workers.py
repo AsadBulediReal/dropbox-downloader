@@ -544,7 +544,6 @@ class DownloadWorker(QObject):
             self.pause_start_time = time.time()
             self._pause_event.clear()
             self.paused_signal.emit(True)
-            self.log.emit("⏸ Download paused.")
 
     def resume(self):
         if self._is_paused:
@@ -554,7 +553,6 @@ class DownloadWorker(QObject):
             self._is_paused = False
             self._pause_event.set()
             self.paused_signal.emit(False)
-            self.log.emit("▶ Download resumed.")
 
     def toggle_pause(self):
         if self._is_paused:

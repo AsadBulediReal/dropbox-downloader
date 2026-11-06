@@ -843,7 +843,7 @@ class MainWindow(QMainWindow):
                 st.polish(self.pause_button)
             self.set_status_badge("⏸ Paused", "warning")
             self.val_speed.setText("Paused")
-            self.add_log("⏸ Download paused by user.")
+            self.add_log("⏸ Download paused.")
         else:
             self.pause_button.setText("⏸  Pause Download")
             self.pause_button.setProperty("class", "btn-pause")
