@@ -101,6 +101,52 @@ class _ClickBackdrop(QFrame):
         super().mousePressEvent(event)
 
 
+class _RecentLinkRow(QFrame):
+    """Clickable two-line recent folder row matching the Guided Wizard design."""
+
+    clicked = Signal()
+
+    def __init__(self, title_text: str, url_text: str, show_top_border: bool = True, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setProperty("class", "recent-row")
+        if not show_top_border:
+            self.setProperty("first", "true")
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        row_layout = QHBoxLayout(self)
+        row_layout.setContentsMargins(8, 9, 8, 9)
+        row_layout.setSpacing(12)
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+
+        lbl_title = QLabel(title_text)
+        lbl_title.setProperty("class", "recent-row-title")
+        lbl_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        lbl_url = QLabel(url_text)
+        lbl_url.setProperty("class", "recent-row-url")
+        lbl_url.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        text_col.addWidget(lbl_title)
+        text_col.addWidget(lbl_url)
+        row_layout.addLayout(text_col, 1)
+
+        lbl_open = QLabel("Open →")
+        lbl_open.setProperty("class", "recent-row-open")
+        lbl_open.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        lbl_open.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        row_layout.addWidget(lbl_open, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     _RE_START_FILE = re.compile(
         r"^(?:GET\s+|🔄 RESUME |🔄 RESTART |🔄 REPAIRING )\[(.*?)\] (.*?)(?:\s+\(|\:\s+)"
@@ -189,14 +235,16 @@ class MainWindow(QMainWindow):
                 self.btn_theme_toggle.setText("☀️  Switch to Clean Light Mode")
 
         # Re-apply dynamic badges & colors
-        self.set_auth_badge(
-            self.auth_badge.text() or ("● Connected" if self.is_logged_in() else "○ Not Logged In"),
-            "connected" if self.is_logged_in() else "neutral",
-        )
-        self.set_status_badge(
-            self.status_badge.text() or "● Ready",
-            getattr(self, "_last_status_state", "ready"),
-        )
+        if hasattr(self, "auth_badge"):
+            self.set_auth_badge(
+                self.auth_badge.text() or ("● Connected" if self.is_logged_in() else "○ Not Logged In"),
+                "connected" if self.is_logged_in() else "neutral",
+            )
+        if hasattr(self, "status_badge"):
+            self.set_status_badge(
+                self.status_badge.text() or "● Ready",
+                getattr(self, "_last_status_state", "ready"),
+            )
         self._refresh_all_queue_item_styles()
         if save:
             self.settings.setValue("theme_mode", self.theme_mode)
@@ -207,6 +255,8 @@ class MainWindow(QMainWindow):
 
     def set_status_badge(self, text: str, state: str = "ready"):
         self._last_status_state = state
+        if not hasattr(self, "status_badge"):
+            return
         is_light = self.theme_mode == "light"
         if is_light:
             styles = {
@@ -235,6 +285,8 @@ class MainWindow(QMainWindow):
         )
 
     def set_auth_badge(self, text: str, state: str = "neutral"):
+        if not hasattr(self, "auth_badge"):
+            return
         is_light = self.theme_mode == "light"
         if is_light:
             styles = {
@@ -289,35 +341,21 @@ class MainWindow(QMainWindow):
         header_card = QFrame()
         header_card.setProperty("class", "header-card")
         header_layout = QHBoxLayout(header_card)
-        header_layout.setContentsMargins(22, 12, 22, 12)
+        header_layout.setContentsMargins(24, 14, 24, 14)
         header_layout.setSpacing(12)
 
         brand_row = QHBoxLayout()
-        brand_row.setSpacing(8)
+        brand_row.setSpacing(10)
         brand_icon = QLabel("📦")
+        brand_icon.setProperty("class", "brand-icon")
         brand_icon.setFixedSize(32, 32)
         brand_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_icon.setStyleSheet(
-            "background-color: #0061ff; color: #ffffff; border-radius: 9px; font-size: 16px; font-weight: bold;"
-        )
         brand_row.addWidget(brand_icon)
 
         title_label = QLabel("Dropbox Downloader")
-        title_label.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        title_label.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         title_label.setStyleSheet("background-color: transparent; font-weight: 700;")
         brand_row.addWidget(title_label)
-
-        self.auth_badge = QLabel()
-        brand_row.addWidget(self.auth_badge)
-
-        self.status_badge = QLabel()
-        brand_row.addWidget(self.status_badge)
-
-        self.btn_header_login = QPushButton("🌐 Log In")
-        self.btn_header_login.setProperty("class", "btn-primary")
-        self.btn_header_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_header_login.clicked.connect(self.login_with_dropbox)
-        brand_row.addWidget(self.btn_header_login)
 
         header_layout.addLayout(brand_row)
         header_layout.addStretch(1)
@@ -325,19 +363,23 @@ class MainWindow(QMainWindow):
         # Center 3-Step Guided Wizard Pill Bar
         self.wizard_pill_bar = QFrame()
         self.wizard_pill_bar.setProperty("class", "wizard-pill-bar")
+        self.wizard_pill_bar.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         pill_layout = QHBoxLayout(self.wizard_pill_bar)
         pill_layout.setContentsMargins(4, 4, 4, 4)
         pill_layout.setSpacing(4)
 
-        self.btn_step_1 = QPushButton("1. Link & Recent")
+        self.btn_step_1 = QPushButton("1. Link && Recent")
+        self.btn_step_1.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.btn_step_1.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_step_1.clicked.connect(lambda: self.go_to_step(0))
 
         self.btn_step_2 = QPushButton("2. Select Files")
+        self.btn_step_2.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.btn_step_2.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_step_2.clicked.connect(lambda: self.go_to_step(1))
 
         self.btn_step_3 = QPushButton("3. Transfers")
+        self.btn_step_3.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.btn_step_3.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_step_3.clicked.connect(lambda: self.go_to_step(2))
 
@@ -364,10 +406,12 @@ class MainWindow(QMainWindow):
         workspace_scroll = QScrollArea()
         workspace_scroll.setWidgetResizable(True)
         workspace_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        workspace_scroll.viewport().setAutoFillBackground(False)
 
         workspace_container = QWidget()
+        workspace_container.setObjectName("workspaceContainer")
         workspace_layout = QVBoxLayout(workspace_container)
-        workspace_layout.setContentsMargins(24, 20, 24, 10)
+        workspace_layout.setContentsMargins(28, 20, 28, 12)
         workspace_layout.setSpacing(14)
 
         self.wizard_stack = QStackedWidget()
@@ -380,23 +424,25 @@ class MainWindow(QMainWindow):
         step1_outer.addStretch(1)
 
         step1_col = QWidget()
-        step1_col.setMaximumWidth(780)
+        step1_col.setMaximumWidth(768)
         step1_col.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         step1_layout = QVBoxLayout(step1_col)
         step1_layout.setContentsMargins(0, 12, 0, 12)
-        step1_layout.setSpacing(18)
+        step1_layout.setSpacing(20)
         step1_layout.addStretch(1)
 
         # Login Required Banner (shown when signed out)
         self.login_banner = QFrame()
         self.login_banner.setProperty("class", "login-banner")
         banner_layout = QHBoxLayout(self.login_banner)
-        banner_layout.setContentsMargins(16, 12, 16, 12)
-        banner_layout.setSpacing(12)
+        banner_layout.setContentsMargins(18, 14, 18, 14)
+        banner_layout.setSpacing(14)
 
         banner_icon = QLabel("🔒")
-        banner_icon.setStyleSheet("font-size: 22px; background-color: transparent;")
-        banner_layout.addWidget(banner_icon)
+        banner_icon.setProperty("class", "login-banner-icon")
+        banner_icon.setFixedSize(40, 40)
+        banner_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        banner_layout.addWidget(banner_icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
         banner_text_layout = QVBoxLayout()
         banner_text_layout.setSpacing(2)
@@ -416,7 +462,7 @@ class MainWindow(QMainWindow):
         self.btn_banner_login.setFixedHeight(36)
         self.btn_banner_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_banner_login.clicked.connect(self.login_with_dropbox)
-        banner_layout.addWidget(self.btn_banner_login)
+        banner_layout.addWidget(self.btn_banner_login, 0, Qt.AlignmentFlag.AlignVCenter)
         step1_layout.addWidget(self.login_banner)
 
         # Centered Hero Title
@@ -425,7 +471,7 @@ class MainWindow(QMainWindow):
         hero_title = QLabel("Paste Dropbox Shared Link")
         hero_title.setProperty("class", "hero-title")
         hero_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_subtitle = QLabel("Enter any shared folder or file link, or reload a recent folder in one click.")
+        hero_subtitle = QLabel("Enter a shared folder or file link, or reload a recent link in one click.")
         hero_subtitle.setProperty("class", "hero-subtitle")
         hero_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hero_subtitle.setWordWrap(True)
@@ -437,7 +483,7 @@ class MainWindow(QMainWindow):
         self.target_card = QFrame()
         self.target_card.setProperty("class", "url-command-card")
         target_layout = QHBoxLayout(self.target_card)
-        target_layout.setContentsMargins(10, 8, 10, 8)
+        target_layout.setContentsMargins(12, 10, 12, 10)
         target_layout.setSpacing(8)
 
         self.url_input = QLineEdit()
@@ -447,20 +493,21 @@ class MainWindow(QMainWindow):
         self.url_input.returnPressed.connect(self.start_scan)
 
         self.btn_clear_url = QPushButton("✕ Clear")
-        self.btn_clear_url.setProperty("class", "btn-secondary")
+        self.btn_clear_url.setProperty("class", "btn-ghost")
         self.btn_clear_url.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_clear_url.setToolTip("Clear link and file list")
         self.btn_clear_url.clicked.connect(self.clear_url_and_tree)
 
         self.btn_paste_url = QPushButton("📋 Paste")
         self.btn_paste_url.setProperty("class", "btn-secondary")
+        self.btn_paste_url.setMinimumHeight(38)
         self.btn_paste_url.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_paste_url.setToolTip("Paste link from clipboard and scan")
         self.btn_paste_url.clicked.connect(self.paste_url)
 
         self.btn_scan_url = QPushButton("Load Folders →")
-        self.btn_scan_url.setProperty("class", "btn-primary")
-        self.btn_scan_url.setMinimumHeight(38)
+        self.btn_scan_url.setProperty("class", "btn-load-folders")
+        self.btn_scan_url.setMinimumHeight(40)
         self.btn_scan_url.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_scan_url.setToolTip("Inspect shared folder and select files (Enter)")
         self.btn_scan_url.clicked.connect(self.start_scan)
@@ -475,7 +522,7 @@ class MainWindow(QMainWindow):
         self.recent_card = QFrame()
         self.recent_card.setProperty("class", "card")
         recent_card_layout = QVBoxLayout(self.recent_card)
-        recent_card_layout.setContentsMargins(18, 14, 18, 14)
+        recent_card_layout.setContentsMargins(20, 16, 20, 16)
         recent_card_layout.setSpacing(10)
 
         recent_header = QHBoxLayout()
@@ -485,7 +532,7 @@ class MainWindow(QMainWindow):
         recent_header.addStretch()
 
         self.btn_recent_links = QPushButton("All History ▼")
-        self.btn_recent_links.setProperty("class", "btn-secondary")
+        self.btn_recent_links.setProperty("class", "btn-ghost")
         self.btn_recent_links.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_recent_links.setToolTip("Open full recent links menu or clear history")
         self.btn_recent_links.clicked.connect(self.show_recent_links_menu)
@@ -493,22 +540,24 @@ class MainWindow(QMainWindow):
         recent_card_layout.addLayout(recent_header)
 
         self.recent_chips_container = QWidget()
+        self.recent_chips_container.setStyleSheet("background-color: transparent;")
         self.recent_chips_layout = QHBoxLayout(self.recent_chips_container)
-        self.recent_chips_layout.setContentsMargins(0, 0, 0, 0)
-        self.recent_chips_layout.setSpacing(6)
+        self.recent_chips_layout.setContentsMargins(0, 0, 0, 2)
+        self.recent_chips_layout.setSpacing(8)
         self.recent_chips_container.setVisible(False)
         recent_card_layout.addWidget(self.recent_chips_container)
 
         self.recent_rows_container = QWidget()
+        self.recent_rows_container.setStyleSheet("background-color: transparent;")
         self.recent_rows_layout = QVBoxLayout(self.recent_rows_container)
         self.recent_rows_layout.setContentsMargins(0, 2, 0, 0)
-        self.recent_rows_layout.setSpacing(6)
+        self.recent_rows_layout.setSpacing(2)
         recent_card_layout.addWidget(self.recent_rows_container)
 
         step1_layout.addWidget(self.recent_card)
         step1_layout.addStretch(2)
 
-        step1_outer.addWidget(step1_col, 1)
+        step1_outer.addWidget(step1_col, 100)
         step1_outer.addStretch(1)
         self.wizard_stack.addWidget(step1_page)
 
@@ -626,7 +675,7 @@ class MainWindow(QMainWindow):
         )
         self.btn_verify_files.clicked.connect(self.start_verification_only)
 
-        self.start_button = QPushButton("📋  Paste Link & Select Files to Start")
+        self.start_button = QPushButton("📋  Paste Link && Select Files to Start")
         self.start_button.setProperty("class", "btn-start")
         self.start_button.setEnabled(False)
         self.start_button.setMinimumHeight(40)
@@ -645,7 +694,7 @@ class MainWindow(QMainWindow):
         step2_footer.addWidget(self.btn_view_active_transfer)
         step2_layout.addLayout(step2_footer)
 
-        step2_outer.addWidget(step2_col, 1)
+        step2_outer.addWidget(step2_col, 100)
         step2_outer.addStretch(1)
         self.wizard_stack.addWidget(step2_page)
 
@@ -665,6 +714,9 @@ class MainWindow(QMainWindow):
         # Row 1: Design 3's 3 Bold Summary Stat Cards (Downloaded / Remaining / Speed & Time)
         stats_row = QGridLayout()
         stats_row.setSpacing(12)
+        stats_row.setColumnStretch(0, 1)
+        stats_row.setColumnStretch(1, 1)
+        stats_row.setColumnStretch(2, 1)
 
         # Card A: Downloaded
         card_done = QFrame()
@@ -856,6 +908,10 @@ class MainWindow(QMainWindow):
         qtab_header.addWidget(self.lbl_integrity_badge)
         queue_layout.addLayout(qtab_header)
 
+        qtab_divider = QFrame()
+        qtab_divider.setProperty("class", "divider-line")
+        queue_layout.addWidget(qtab_divider)
+
         self.queue_tree = QTreeWidget()
         self.queue_tree.setHeaderLabels(["File", "Folder", "Status • Size"])
         self.queue_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -868,7 +924,7 @@ class MainWindow(QMainWindow):
 
         step3_layout.addWidget(queue_card, 1)
 
-        step3_outer.addWidget(self.progress_card, 1)
+        step3_outer.addWidget(self.progress_card, 100)
         step3_outer.addStretch(1)
         self.wizard_stack.addWidget(step3_page)
 
@@ -880,12 +936,12 @@ class MainWindow(QMainWindow):
         # PERSISTENT CLEAN BOTTOM BANNER AD
         # ----------------------------------------------------------------------
         ad_outer = QHBoxLayout()
-        ad_outer.setContentsMargins(24, 4, 24, 16)
+        ad_outer.setContentsMargins(28, 4, 28, 18)
         ad_outer.addStretch(1)
         self.ad_banner = AdBannerWidget(self)
         self.ad_banner.setMaximumWidth(920)
         self.ad_banner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        ad_outer.addWidget(self.ad_banner, 1)
+        ad_outer.addWidget(self.ad_banner, 100)
         ad_outer.addStretch(1)
         root_layout.addLayout(ad_outer)
 
@@ -925,10 +981,16 @@ class MainWindow(QMainWindow):
         drawer_header.addWidget(self.btn_close_settings)
         drawer_outer.addLayout(drawer_header)
 
+        drawer_top_divider = QFrame()
+        drawer_top_divider.setProperty("class", "divider-line")
+        drawer_outer.addWidget(drawer_top_divider)
+
         drawer_scroll = QScrollArea()
         drawer_scroll.setWidgetResizable(True)
         drawer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        drawer_scroll.viewport().setAutoFillBackground(False)
         drawer_content = QWidget()
+        drawer_content.setObjectName("drawerScrollContent")
         drawer_layout = QVBoxLayout(drawer_content)
         drawer_layout.setContentsMargins(0, 4, 4, 4)
         drawer_layout.setSpacing(16)
@@ -1075,9 +1137,13 @@ class MainWindow(QMainWindow):
         drawer_scroll.setWidget(drawer_content)
         drawer_outer.addWidget(drawer_scroll, 1)
 
+        drawer_bot_divider = QFrame()
+        drawer_bot_divider.setProperty("class", "divider-line")
+        drawer_outer.addWidget(drawer_bot_divider)
+
         drawer_footer = QHBoxLayout()
         drawer_footer.addStretch()
-        btn_save_close = QPushButton("Save & Close")
+        btn_save_close = QPushButton("Save && Close")
         btn_save_close.setProperty("class", "btn-primary")
         btn_save_close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_save_close.clicked.connect(self._save_and_close_settings)
@@ -1104,6 +1170,22 @@ class MainWindow(QMainWindow):
         if hasattr(self, "settings_overlay") and self.settings_overlay is not None:
             self.settings_overlay.setGeometry(self.rect())
 
+    def _refresh_wizard_pill_geometry(self):
+        if not hasattr(self, "wizard_pill_bar") or self.wizard_pill_bar is None:
+            return
+        for btn in (self.btn_step_1, self.btn_step_2, self.btn_step_3):
+            self._repolish(btn)
+            btn.updateGeometry()
+        lay = self.wizard_pill_bar.layout()
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
+        self.wizard_pill_bar.updateGeometry()
+        parent = self.wizard_pill_bar.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().invalidate()
+            parent.layout().activate()
+
     def go_to_step(self, step_index: int):
         idx = max(0, min(int(step_index), 2))
         self.current_step = idx
@@ -1113,7 +1195,7 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(step_buttons):
             cls_name = "wizard-step-btn-active" if i == idx else "wizard-step-btn"
             btn.setProperty("class", cls_name)
-            self._repolish(btn)
+        self._refresh_wizard_pill_geometry()
 
     def open_settings_drawer(self):
         self.settings_overlay.setGeometry(self.rect())
@@ -1373,6 +1455,7 @@ class MainWindow(QMainWindow):
             self.val_remaining_files.setText("0 files left")
             self.val_remaining_bytes.setText("0 B remaining")
             self.btn_step_3.setText("3. Transfers")
+        self._refresh_wizard_pill_geometry()
 
         # Live ETA calculation when actively transferring
         if (
@@ -1551,7 +1634,6 @@ class MainWindow(QMainWindow):
             self._repolish(self.btn_oauth_login)
             self.btn_logout.setVisible(True)
             self.login_banner.setVisible(False)
-            self.btn_header_login.setVisible(False)
         else:
             self.account_name_label.setText("No Dropbox account connected")
             self.account_sub_label.setText("Sign in to your Dropbox account")
@@ -1561,7 +1643,6 @@ class MainWindow(QMainWindow):
             self._repolish(self.btn_oauth_login)
             self.btn_logout.setVisible(False)
             self.login_banner.setVisible(True)
-            self.btn_header_login.setVisible(True)
 
         self.update_feature_enabled_state()
 
@@ -1704,7 +1785,7 @@ class MainWindow(QMainWindow):
 
         if not has_link:
             self.start_button.setEnabled(False)
-            self.start_button.setText("📋  Paste Link & Select Files to Start")
+            self.start_button.setText("📋  Paste Link && Select Files to Start")
         elif not has_tree:
             self.start_button.setEnabled(False)
             self.start_button.setText("🔍  Load Folders to Select Files")
@@ -1797,6 +1878,8 @@ class MainWindow(QMainWindow):
             if child is not None:
                 w = child.widget()
                 if w is not None:
+                    w.hide()
+                    w.setParent(None)
                     w.deleteLater()
 
     def update_recent_links_ui(self):
@@ -1817,8 +1900,9 @@ class MainWindow(QMainWindow):
         for item in self.recent_links[:4]:
             title = item.get("title") or "Dropbox Folder"
             display_name = (title[:22] + "…") if len(title) > 24 else title
+            safe_chip_text = display_name.replace("&", "&&")
 
-            chip_btn = QPushButton(f"📁 {display_name}")
+            chip_btn = QPushButton(f"📁 {safe_chip_text}")
             chip_btn.setProperty("class", "recent-chip")
             chip_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             tooltip_txt = f"📁 {title}\n🔗 {item.get('url', '')}\n📅 Saved: {item.get('date_str', '')}"
@@ -1834,7 +1918,7 @@ class MainWindow(QMainWindow):
         self.recent_chips_container.setVisible(True)
 
         # 2. Detailed Recent Rows (top 3)
-        for item in self.recent_links[:3]:
+        for idx, item in enumerate(self.recent_links[:3]):
             title = item.get("title") or "Dropbox Folder"
             url = item.get("url", "")
             cnt = item.get("item_count")
@@ -1844,14 +1928,16 @@ class MainWindow(QMainWindow):
             if item.get("date_str"):
                 meta_parts.append(item.get("date_str"))
             meta_suffix = f"  •  {' • '.join(meta_parts)}" if meta_parts else ""
-            short_url = url if len(url) <= 68 else (url[:65] + "...")
+            short_url = url if len(url) <= 72 else (url[:69] + "...")
 
-            row_btn = QPushButton(f"📂  {title}{meta_suffix}\n      {short_url}     → Open")
-            row_btn.setProperty("class", "recent-row-btn")
-            row_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            row_btn.setToolTip(url)
-            row_btn.clicked.connect(lambda _, u=url: self.load_recent_link(u))
-            self.recent_rows_layout.addWidget(row_btn)
+            row_widget = _RecentLinkRow(
+                title_text=f"📂 {title}{meta_suffix}",
+                url_text=short_url,
+                show_top_border=(idx > 0),
+            )
+            row_widget.setToolTip(url)
+            row_widget.clicked.connect(lambda u=url: self.load_recent_link(u))
+            self.recent_rows_layout.addWidget(row_widget)
 
     def show_recent_links_menu(self):
         if not self.is_logged_in():
@@ -1864,12 +1950,12 @@ class MainWindow(QMainWindow):
             empty_act.setEnabled(False)
         else:
             for item in self.recent_links:
-                title = item.get("title") or "Dropbox Folder"
+                title = (item.get("title") or "Dropbox Folder").replace("&", "&&")
                 url = item.get("url", "")
                 cnt = item.get("item_count")
                 cnt_txt = f"  ({cnt} items)" if cnt else ""
                 date_txt = f"  •  {item.get('date_str', '')}" if item.get("date_str") else ""
-                short_url = url[:60] + ("..." if len(url) > 60 else "")
+                short_url = (url[:60] + ("..." if len(url) > 60 else "")).replace("&", "&&")
                 action_text = f"📁 {title}{cnt_txt}{date_txt}\n    {short_url}"
                 act = menu.addAction(action_text)
                 act.triggered.connect(lambda _, u=url: self.load_recent_link(u))
@@ -2948,6 +3034,7 @@ class MainWindow(QMainWindow):
                 summary_txt += f" • {format_bytes(selected_bytes)}"
             self.set_selection_summary(summary_txt, "success" if selected_files > 0 else "neutral")
             self.btn_step_2.setText(f"2. Select Files ({selected_files})")
+        self._refresh_wizard_pill_geometry()
 
         if not self._is_running:
             self.rebuild_queue_from_selection()

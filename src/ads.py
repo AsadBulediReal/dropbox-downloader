@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import requests
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 
 DEFAULT_ADS: list[dict[str, str]] = [
@@ -123,25 +123,28 @@ class AdBannerWidget(QFrame):
         self._feed_worker: AdFeedWorker | None = None
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setContentsMargins(20, 10, 20, 10)
         layout.setSpacing(12)
 
         self.badge_label = QLabel("Sponsored")
         self.badge_label.setProperty("class", "ad-badge")
         self.badge_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.badge_label)
+        self.badge_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.badge_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.text_label = QLabel()
         self.text_label.setProperty("class", "ad-text")
         self.text_label.setWordWrap(True)
         self.text_label.setTextFormat(Qt.TextFormat.RichText)
-        layout.addWidget(self.text_label, 1)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.text_label, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self.cta_button = QPushButton("Claim Offer →")
         self.cta_button.setProperty("class", "ad-cta")
         self.cta_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.cta_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.cta_button.clicked.connect(self.open_current_ad)
-        layout.addWidget(self.cta_button)
+        layout.addWidget(self.cta_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.rotation_timer = QTimer(self)
         self.rotation_timer.setInterval(45000)

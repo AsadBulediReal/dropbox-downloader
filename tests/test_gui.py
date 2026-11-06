@@ -39,10 +39,15 @@ class TestMainWindowGUI(unittest.TestCase):
         self.assertFalse(self.win.is_logged_in())
         self.assertFalse(self.win.url_input.isEnabled())
         self.assertFalse(self.win.btn_scan_url.isEnabled())
+        self.assertFalse(hasattr(self.win, "btn_header_login"))
+        self.assertFalse(hasattr(self.win, "auth_badge"))
+        self.assertFalse(hasattr(self.win, "status_badge"))
+        self.assertFalse(self.win.login_banner.isHidden())
 
         self.win.current_access_token = "test_access_token"
-        self.win.update_feature_enabled_state()
+        self.win.update_account_ui()
         self.assertTrue(self.win.is_logged_in())
+        self.assertTrue(self.win.login_banner.isHidden())
         self.assertTrue(self.win.url_input.isEnabled())
         self.assertTrue(self.win.btn_scan_url.isEnabled())
 
@@ -220,6 +225,29 @@ class TestMainWindowGUI(unittest.TestCase):
         with patch("src.ads.webbrowser.open") as mock_open:
             self.win.ad_banner.cta_button.click()
             mock_open.assert_called_once()
+
+    def test_ui_layout_widths_ampersands_and_recent_row_cleanup(self):
+        # Ampersands escaped for Qt buttons so "&" is displayed rather than stripped
+        self.assertEqual(self.win.btn_step_1.text(), "1. Link && Recent")
+
+        self.win.resize(980, 780)
+        self.win.show()
+        self.app.processEvents()
+
+        # Centered containers should expand toward their max-width rather than 1/3 width
+        self.assertGreaterEqual(self.win.target_card.width(), 700)
+        self.assertGreaterEqual(self.win.ad_banner.width(), 800)
+
+        # Updating recent links repeatedly must immediately unparent old row widgets
+        self.win.current_access_token = "test_access_token"
+        self.win.update_account_ui()
+        self.win.add_recent_link("https://www.dropbox.com/scl/fo/1/Photos_&_Videos", title="Photos & Videos", item_count=4)
+        self.win.add_recent_link("https://www.dropbox.com/scl/fo/2/Client_Files", title="Client_Files", item_count=9)
+        self.app.processEvents()
+        self.assertEqual(self.win.recent_rows_layout.count(), 2)
+        row_children = self.win.recent_rows_container.findChildren(main_window_mod._RecentLinkRow)
+        self.assertEqual(len(row_children), 2)
+        self.assertTrue(all(w.isVisible() for w in row_children))
 
 
 if __name__ == "__main__":
