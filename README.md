@@ -53,6 +53,54 @@ When you open the app:
 
 ---
 
+## 🏗️ Architecture & Modular Code Structure
+
+The project follows a strict **≤ 400 lines of code per file** maximum quality rule. Logic is organized into focused, modular packages under `src/`, with top-level `__init__.py` files exposing clean, backwards-compatible public interfaces:
+
+```
+src/
+├── __init__.py                  # Public library exports
+├── ads.py                       # Bottom sponsor banner & feed rotation
+├── checkmark.svg                # Checkmark vector resource
+├── dialogs/                     # Custom sleek UI dialogs & tree widget
+│   ├── __init__.py              # ModernMessageBox & ModernInputDialog
+│   └── loading_tree.py          # ModernLoadingDialog & FileTreeWidget
+├── main_window/                 # MainWindow controller & mixins
+│   ├── __init__.py              # MainWindow assembly & public exports
+│   ├── account_state.py         # Account status & action button state mixin
+│   ├── oauth.py                 # PKCE OAuth browser authentication flow
+│   ├── queue.py                 # Live transfer queue & Downloaded/Remaining preview
+│   ├── recent_links.py          # Recent folders history, chips & destination pickers
+│   ├── scan_tree.py             # Folder scanning & directory tree population
+│   ├── settings_session.py      # QSettings persistence & session verification
+│   ├── transfer_start.py        # Download & verification worker thread orchestration
+│   ├── transfer_status.py       # Live transfer telemetry, speed & activity logging
+│   ├── tree_interactions.py     # Context menus, shift+click range & spacebar toggle
+│   ├── tree_selection.py        # Checkbox state propagation & summary counters
+│   ├── ui_drawer.py             # Slide-over settings drawer & central layout root
+│   ├── ui_step3.py              # Step 3 Transfers view & queue filter cards
+│   ├── ui_steps12.py            # Header bar, Step 1 Link view & Step 2 Tree view
+│   └── widgets_theme.py         # Dynamic theme badges, backdrop & recent link rows
+├── styles/                      # Dual theme system (Clean Light & Minimal Dark)
+│   ├── __init__.py              # Stylesheet compiler & SVG asset injection
+│   ├── dark_layout.py           # Dark mode layout & containers QSS
+│   ├── dark_widgets.py          # Dark mode controls & inputs QSS
+│   ├── light_layout.py          # Light mode layout & containers QSS
+│   └── light_widgets.py         # Light mode controls & inputs QSS
+├── utils/                       # Core utilities & API helpers
+│   ├── __init__.py              # Pathing, formatting & error-parsing utilities
+│   └── dropbox.py               # Dropbox client, content hashing & tree builders
+└── workers/                     # Background QThread workers & transfer mixins
+    ├── __init__.py              # Worker re-exports
+    ├── auth_scan.py             # AuthWorker, SessionVerifyWorker & ScanWorker
+    ├── collect_mixin.py         # DownloadFileItem & recursive entry collection
+    ├── download.py              # DownloadWorker controller & lifecycle management
+    ├── transfer_mixin.py        # HTTP Range resume & chunk-flushed streaming
+    └── verify_mixin.py          # SHA-256 block hash verification & auto-repair
+```
+
+---
+
 ## Features
 
 - **Login-Gated Workspace**: All functional controls (link loading, destination configuration, directory tree selection, and downloading) remain locked until an account is connected, preventing unauthenticated API failures.
@@ -89,13 +137,17 @@ When you open the app:
 
 ## 🧪 Running Unit Tests
 
-Run the automated unit test suite (`tests/`) using Python's built-in `unittest` runner (no extra packages required):
+Run the full automated test suite with pytest or Python's built-in `unittest` runner:
 
 ```bash
-.venv\Scripts\python.exe -m unittest discover -s tests -v
+# Using pytest (recommended):
+python -m pytest -v
+
+# Or using built-in unittest:
+python -m unittest discover -s tests -v
 ```
 
 The test suite covers:
 - **`tests/test_utils.py`**: Path sanitization & traversal guards, human-friendly error mapping, single-folder destination matching, natural sorting, tree hierarchy metrics, selection filters, and multi-block Dropbox SHA-256 content hashing.
 - **`tests/test_workers.py`**: OAuth/session workers, parallel folder scanning, HTTP `Range` (`206`) partial resume & 4 KB safety rewind, >30s pause/resume stall protection, `HTTP 416` / `200` fallback, mid-verification stop safety, dynamic queue re-ordering, smart skip, and auto-repair.
-- **`tests/test_gui.py`**: Headless Qt verification of login-gated workspace states, tree controls (`Select All`, `Deselect All`, `Expand All`, `Collapse All`), pause/resume log output, and log filtering.
+- **`tests/test_gui.py`**: Headless Qt verification of login-gated workspace states, tree controls (`Select All`, `Deselect All`, `Expand All`, `Collapse All`), pause/resume log output, recent links, and queue filtering.
