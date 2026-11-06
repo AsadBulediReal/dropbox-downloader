@@ -259,6 +259,62 @@ class TestMainWindowGUI(unittest.TestCase):
         self.assertEqual(len(row_children), 2)
         self.assertTrue(all(w.isVisible() for w in row_children))
 
+    def test_download_finished_shows_inline_message_without_popup(self):
+        self.win.go_to_step(2)
+        self.assertTrue(self.win.transfer_notice_banner.isHidden())
+
+        with (
+            patch.object(main_window_mod.ModernMessageBox, "information") as mock_info,
+            patch.object(main_window_mod.ModernMessageBox, "warning") as mock_warn,
+        ):
+            msg = (
+                "✓ Download & Verification Finished Successfully!\n\n"
+                "Files Selected: 3\n"
+                "Completed: 3\n"
+                "Skipped: 0\n"
+                "Verified Intact: 3 of 3\n"
+                "Data Transferred: 3.5 KB\n"
+                "Time Elapsed: 1.2s\n"
+                "Output Directory: C:/Downloads/SharedRoot"
+            )
+            self.win.download_finished(msg)
+            mock_info.assert_not_called()
+            mock_warn.assert_not_called()
+
+            self.assertFalse(self.win.transfer_notice_banner.isHidden())
+            self.assertEqual(self.win.transfer_notice_icon.text(), "✓")
+            self.assertEqual(
+                self.win.transfer_notice_title.text(),
+                "Download & Verification Finished Successfully!",
+            )
+            self.assertIn("Completed: 3", self.win.transfer_notice_detail.text())
+            self.assertIn("Saved to: C:/Downloads/SharedRoot", self.win.transfer_notice_detail.text())
+
+            # Warnings state shows inline warning banner without modal popup
+            warn_msg = (
+                "⚠️ Download Finished with Verification Warnings!\n\n"
+                "Files Selected: 3\n"
+                "Corrupted: 1"
+            )
+            self.win.download_finished(warn_msg)
+            mock_info.assert_not_called()
+            mock_warn.assert_not_called()
+            self.assertFalse(self.win.transfer_notice_banner.isHidden())
+            self.assertEqual(self.win.transfer_notice_icon.text(), "⚠")
+
+            # Stopped state shows inline neutral banner without modal popup
+            self.win.download_finished("Download cancelled by user.")
+            mock_info.assert_not_called()
+            mock_warn.assert_not_called()
+            self.assertFalse(self.win.transfer_notice_banner.isHidden())
+            self.assertEqual(self.win.transfer_notice_icon.text(), "⏹")
+            self.assertEqual(self.win.transfer_notice_title.text(), "Operation Stopped")
+            self.assertEqual(self.win.transfer_notice_detail.text(), "Download cancelled by user.")
+
+        # Dismiss button hides banner cleanly
+        self.win.btn_dismiss_transfer_notice.click()
+        self.assertTrue(self.win.transfer_notice_banner.isHidden())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -201,6 +201,7 @@ class MainWindow(QMainWindow):
         self._active_queue_key: str = ""
         self._total_batch_files: int = 0
         self._total_batch_bytes: int = 0
+        self._transfer_notice_state: str = "success"
 
         self.auto_scan_timer = QTimer(self)
         self.auto_scan_timer.setSingleShot(True)
@@ -242,6 +243,8 @@ class MainWindow(QMainWindow):
                 self.status_badge.text() or "● Ready",
                 getattr(self, "_last_status_state", "ready"),
             )
+        if hasattr(self, "transfer_notice_banner"):
+            self._apply_transfer_notice_style()
         self._refresh_all_queue_item_styles()
         if save:
             self.settings.setValue("theme_mode", self.theme_mode)
@@ -322,6 +325,75 @@ class MainWindow(QMainWindow):
         self.selection_summary_label.setStyleSheet(
             f"background-color: {bg}; color: {fg}; border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 600;"
         )
+
+    def _apply_transfer_notice_style(self, state: str | None = None):
+        if state is not None:
+            self._transfer_notice_state = state
+        cur_state = getattr(self, "_transfer_notice_state", "success")
+        if not hasattr(self, "transfer_notice_banner"):
+            return
+        is_light = self.theme_mode == "light"
+        if is_light:
+            themes = {
+                "success": ("#ecfdf5", "#a7f3d0", "#d1fae5", "#059669", "#6ee7b7", "#065f46", "#047857"),
+                "warning": ("#fffbeb", "#fde68a", "#fef3c7", "#d97706", "#fcd34d", "#92400e", "#b45309"),
+                "neutral": ("#f1f5f9", "#cbd5e1", "#e2e8f0", "#475569", "#cbd5e1", "#0f172a", "#475569"),
+            }
+        else:
+            themes = {
+                "success": ("#064e3b", "#059669", "#065f46", "#34d399", "#10b981", "#ecfdf5", "#a7f3d0"),
+                "warning": ("#451a03", "#d97706", "#78350f", "#fbbf24", "#f59e0b", "#fef3c7", "#fde68a"),
+                "neutral": ("#1e293b", "#334155", "#0f172a", "#94a3b8", "#334155", "#f8fafc", "#cbd5e1"),
+            }
+        bg, bd, icon_bg, icon_fg, icon_bd, title_fg, detail_fg = themes.get(cur_state, themes["success"])
+        self.transfer_notice_banner.setStyleSheet(
+            f"QFrame#transferNoticeBanner {{ background-color: {bg}; border: 1px solid {bd}; border-radius: 14px; }}"
+        )
+        self.transfer_notice_icon.setStyleSheet(
+            f"background-color: {icon_bg}; color: {icon_fg}; border: 1px solid {icon_bd}; "
+            "border-radius: 17px; font-size: 15px; font-weight: 700;"
+        )
+        self.transfer_notice_title.setStyleSheet(
+            f"color: {title_fg}; font-size: 13px; font-weight: 700; background-color: transparent;"
+        )
+        self.transfer_notice_detail.setStyleSheet(
+            f"color: {detail_fg}; font-size: 12px; background-color: transparent;"
+        )
+
+    def show_transfer_notice(self, default_title: str, message: str, state: str = "success"):
+        if not hasattr(self, "transfer_notice_banner"):
+            return
+        lines = [ln.strip() for ln in (message or "").strip().splitlines() if ln.strip()]
+        if len(lines) > 1:
+            heading = re.sub(r"^[✓✔⚠⚠️⏹\ufe0f]+\s*", "", lines[0]).strip() or default_title
+            detail_parts = []
+            for ln in lines[1:]:
+                if ln.startswith("Output Directory:"):
+                    out_path = ln.split(":", 1)[1].strip()
+                    short_out = out_path if len(out_path) <= 46 else ("…" + out_path[-44:])
+                    detail_parts.append(f"Saved to: {short_out}")
+                else:
+                    detail_parts.append(ln)
+            detail = "  •  ".join(detail_parts)
+        elif len(lines) == 1:
+            heading = default_title
+            detail = lines[0]
+        else:
+            heading = default_title
+            detail = ""
+
+        icons = {"success": "✓", "warning": "⚠", "neutral": "⏹"}
+        self.transfer_notice_icon.setText(icons.get(state, "✓"))
+        self.transfer_notice_title.setText(heading)
+        self.transfer_notice_detail.setText(detail)
+        self.transfer_notice_detail.setVisible(bool(detail))
+        self.transfer_notice_banner.setToolTip((message or "").strip())
+        self._apply_transfer_notice_style(state)
+        self.transfer_notice_banner.setVisible(True)
+
+    def hide_transfer_notice(self):
+        if hasattr(self, "transfer_notice_banner"):
+            self.transfer_notice_banner.setVisible(False)
 
     # ==========================================================================
     # UI Construction (3-Step Guided Wizard + Queue Tabs + Bottom Ad + Settings)
@@ -706,6 +778,42 @@ class MainWindow(QMainWindow):
         step3_layout = QVBoxLayout(self.progress_card)
         step3_layout.setContentsMargins(0, 4, 0, 4)
         step3_layout.setSpacing(12)
+
+        # Inline Transfer Completion / Status Banner (replaces modal completion popup)
+        self.transfer_notice_banner = QFrame()
+        self.transfer_notice_banner.setObjectName("transferNoticeBanner")
+        self.transfer_notice_banner.setVisible(False)
+        notice_layout = QHBoxLayout(self.transfer_notice_banner)
+        notice_layout.setContentsMargins(16, 12, 12, 12)
+        notice_layout.setSpacing(12)
+
+        self.transfer_notice_icon = QLabel("✓")
+        self.transfer_notice_icon.setFixedSize(34, 34)
+        self.transfer_notice_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        notice_layout.addWidget(self.transfer_notice_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        notice_text_col = QVBoxLayout()
+        notice_text_col.setContentsMargins(0, 0, 0, 0)
+        notice_text_col.setSpacing(2)
+
+        self.transfer_notice_title = QLabel("")
+        self.transfer_notice_detail = QLabel("")
+        self.transfer_notice_detail.setWordWrap(True)
+        self.transfer_notice_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        notice_text_col.addWidget(self.transfer_notice_title)
+        notice_text_col.addWidget(self.transfer_notice_detail)
+        notice_layout.addLayout(notice_text_col, 1)
+
+        self.btn_dismiss_transfer_notice = QPushButton("✕")
+        self.btn_dismiss_transfer_notice.setProperty("class", "btn-ghost")
+        self.btn_dismiss_transfer_notice.setFixedSize(28, 28)
+        self.btn_dismiss_transfer_notice.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_dismiss_transfer_notice.setToolTip("Dismiss message")
+        self.btn_dismiss_transfer_notice.clicked.connect(self.hide_transfer_notice)
+        notice_layout.addWidget(self.btn_dismiss_transfer_notice, 0, Qt.AlignmentFlag.AlignTop)
+
+        step3_layout.addWidget(self.transfer_notice_banner)
 
         # Row 1: Design 3's 3 Bold Summary Stat Cards (Downloaded / Remaining / Speed & Time)
         stats_row = QGridLayout()
@@ -2474,6 +2582,7 @@ class MainWindow(QMainWindow):
         self._scanned_url = ""
         self.step2_folder_label.setText("📂 Shared Folder")
         self.btn_step_2.setText("2. Select Files")
+        self.hide_transfer_notice()
         self.show_empty_tree_placeholder()
         self.rebuild_queue_from_selection()
         if self.is_logged_in():
@@ -3288,6 +3397,7 @@ class MainWindow(QMainWindow):
 
         self.save_settings()
         self.close_settings_drawer()
+        self.hide_transfer_notice()
 
         root_name = getattr(self, "current_root_name", "")
         if not root_name and self.tree_widget.topLevelItemCount() > 0:
@@ -3414,6 +3524,7 @@ class MainWindow(QMainWindow):
             return
 
         self.close_settings_drawer()
+        self.hide_transfer_notice()
         self.rebuild_queue_from_selection()
 
         self.file_progress.setValue(0)
@@ -3564,8 +3675,8 @@ class MainWindow(QMainWindow):
                 if not self._is_completed_status(self._queue_records[self._active_queue_key]["status"]):
                     self._set_queue_item_status(self._active_queue_key, "queued")
                 self._active_queue_key = ""
-            ModernMessageBox.information(self, "Operation Stopped", message)
-        elif has_corrupted or has_missing or has_errors:
+            self.show_transfer_notice("Operation Stopped", message, "neutral")
+        elif has_corrupted or has_missing or has_errors or "warning" in message.lower():
             self.set_status_badge("⚠️ Warnings", "warning")
             self.folder_label.setText("Completed with Warnings")
             self.file_label.setText("Some files had verification or download issues")
@@ -3575,7 +3686,7 @@ class MainWindow(QMainWindow):
             self.overall_progress.setValue(100)
             self.val_speed.setText("0 B/s")
             self.val_eta.setText("")
-            ModernMessageBox.warning(self, "Completed with Warnings", message)
+            self.show_transfer_notice("Completed with Warnings", message, "warning")
         else:
             self.set_status_badge("● Completed", "success")
             self.folder_label.setText("Completed")
@@ -3587,7 +3698,7 @@ class MainWindow(QMainWindow):
             self.val_speed.setText("0 B/s")
             self.val_eta.setText("")
             self._refresh_queue_counts_and_cards()
-            ModernMessageBox.information(self, "Completed Successfully", message)
+            self.show_transfer_notice("Completed Successfully", message, "success")
 
         self.update_feature_enabled_state()
         self.update_download_button_state()
@@ -3595,6 +3706,7 @@ class MainWindow(QMainWindow):
     def download_failed(self, error: str):
         self.download_thread = None
         self.set_running(False)
+        self.hide_transfer_notice()
         self.update_feature_enabled_state()
         self.update_download_button_state()
 
