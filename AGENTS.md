@@ -24,3 +24,10 @@
 
 6. **Preserve Code Integrity**:
    - Maintain all existing comments, docstrings, type annotations, and error handling.
+
+## File Length Limit (Maximum 400 Lines)
+
+7. **400-Line Maximum Per File**:
+   - Code in any single file must NOT exceed **400 lines**.
+   - Before and after creating or editing a file, verify its total line count stays at or below 400 lines.
+   - If a requested addition would push a file over 400 lines, split new or related logic into well-structured, modular files so every file remains within the 400-line limit (while still respecting Rule 1 on untouched working files unless instructed by the user).
