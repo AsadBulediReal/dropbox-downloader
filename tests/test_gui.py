@@ -196,6 +196,15 @@ class TestMainWindowGUI(unittest.TestCase):
         self.assertTrue(self.win.settings_overlay.isHidden())
         self.win.btn_settings.click()
         self.assertFalse(self.win.settings_overlay.isHidden())
+        self.assertEqual(self.win.btn_theme_toggle.text(), "🌗  Switch Light / Dark Mode")
+
+        self.win.current_access_token = "test_access_token"
+        self.win.current_user_email = "alex@studio.io"
+        self.win.update_account_ui()
+        self.assertEqual(self.win.account_name_label.text(), "alex@studio.io")
+        self.assertEqual(self.win.account_sub_label.text(), "● Connected via PKCE OAuth")
+        self.assertEqual(self.win.btn_oauth_login.text(), "Switch")
+        self.assertFalse(self.win.btn_logout.isHidden())
 
         self.assertEqual(self.win.theme_mode, "light")
         self.win.btn_theme_toggle.click()

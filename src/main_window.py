@@ -229,10 +229,7 @@ class MainWindow(QMainWindow):
         self.theme_mode = "dark" if str(mode).strip().lower() == "dark" else "light"
         self.setStyleSheet(get_theme_stylesheet(self.theme_mode))
         if hasattr(self, "btn_theme_toggle"):
-            if self.theme_mode == "light":
-                self.btn_theme_toggle.setText("🌙  Switch to Minimal Dark Mode")
-            else:
-                self.btn_theme_toggle.setText("☀️  Switch to Clean Light Mode")
+            self.btn_theme_toggle.setText("🌗  Switch Light / Dark Mode")
 
         # Re-apply dynamic badges & colors
         if hasattr(self, "auth_badge"):
@@ -962,20 +959,21 @@ class MainWindow(QMainWindow):
 
         self.settings_drawer = QFrame(self.settings_overlay)
         self.settings_drawer.setProperty("class", "settings-drawer")
-        self.settings_drawer.setFixedWidth(430)
+        self.settings_drawer.setFixedWidth(448)
         drawer_outer = QVBoxLayout(self.settings_drawer)
-        drawer_outer.setContentsMargins(20, 18, 20, 18)
-        drawer_outer.setSpacing(14)
+        drawer_outer.setContentsMargins(24, 20, 24, 20)
+        drawer_outer.setSpacing(12)
 
         drawer_header = QHBoxLayout()
+        drawer_header.setContentsMargins(0, 0, 0, 2)
         drawer_title = QLabel("⚙️ Settings & Diagnostics")
-        drawer_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        drawer_title.setStyleSheet("background-color: transparent; font-weight: 700;")
+        drawer_title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        drawer_title.setStyleSheet("background-color: transparent; font-size: 16px; font-weight: 700;")
         drawer_header.addWidget(drawer_title)
         drawer_header.addStretch()
 
         self.btn_close_settings = QPushButton("✕ Close")
-        self.btn_close_settings.setProperty("class", "btn-secondary")
+        self.btn_close_settings.setProperty("class", "drawer-close-btn")
         self.btn_close_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_close_settings.clicked.connect(self.close_settings_drawer)
         drawer_header.addWidget(self.btn_close_settings)
@@ -992,28 +990,31 @@ class MainWindow(QMainWindow):
         drawer_content = QWidget()
         drawer_content.setObjectName("drawerScrollContent")
         drawer_layout = QVBoxLayout(drawer_content)
-        drawer_layout.setContentsMargins(0, 4, 4, 4)
-        drawer_layout.setSpacing(16)
+        drawer_layout.setContentsMargins(0, 4, 2, 4)
+        drawer_layout.setSpacing(18)
 
         # 1. Default Download Folder
         dest_sec = QVBoxLayout()
-        dest_sec.setSpacing(6)
+        dest_sec.setSpacing(8)
         dest_lbl = QLabel("DEFAULT DOWNLOAD FOLDER")
         dest_lbl.setProperty("class", "section-title")
         dest_sec.addWidget(dest_lbl)
 
         dest_row = QHBoxLayout()
-        dest_row.setSpacing(6)
+        dest_row.setSpacing(8)
         self.destination_input = QLineEdit()
+        self.destination_input.setProperty("class", "drawer-subtle-input")
         self.destination_input.setText(str(Path.home() / "Downloads"))
         self.destination_input.setPlaceholderText("Select local folder to save files...")
         self.destination_input.textChanged.connect(self._on_destination_changed)
 
         self.btn_browse = QPushButton("Browse")
+        self.btn_browse.setProperty("class", "drawer-card-btn")
         self.btn_browse.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_browse.clicked.connect(self.browse_destination)
 
         self.btn_open_folder = QPushButton("Open")
+        self.btn_open_folder.setProperty("class", "drawer-card-btn")
         self.btn_open_folder.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_open_folder.clicked.connect(self.open_destination_folder)
 
@@ -1025,12 +1026,12 @@ class MainWindow(QMainWindow):
 
         # 2. Smart Download & Integrity Rules
         rules_sec = QVBoxLayout()
-        rules_sec.setSpacing(8)
+        rules_sec.setSpacing(10)
         rules_lbl = QLabel("DOWNLOAD & INTEGRITY RULES")
         rules_lbl.setProperty("class", "section-title")
         rules_sec.addWidget(rules_lbl)
 
-        self.check_skip_existing = QCheckBox("Skip files that already exist locally (matching exact size)")
+        self.check_skip_existing = QCheckBox("Skip files that already exist locally (exact size)")
         self.check_skip_existing.setChecked(True)
         self.check_skip_existing.stateChanged.connect(lambda: self.save_settings())
         rules_sec.addWidget(self.check_skip_existing)
@@ -1048,7 +1049,7 @@ class MainWindow(QMainWindow):
 
         # 3. Dropbox Account
         acct_sec = QVBoxLayout()
-        acct_sec.setSpacing(6)
+        acct_sec.setSpacing(8)
         acct_lbl = QLabel("DROPBOX ACCOUNT")
         acct_lbl.setProperty("class", "section-title")
         acct_sec.addWidget(acct_lbl)
@@ -1056,27 +1057,27 @@ class MainWindow(QMainWindow):
         account_pill = QFrame()
         account_pill.setProperty("class", "subtle-card")
         account_pill_layout = QHBoxLayout(account_pill)
-        account_pill_layout.setContentsMargins(12, 10, 12, 10)
-        account_pill_layout.setSpacing(8)
+        account_pill_layout.setContentsMargins(14, 12, 14, 12)
+        account_pill_layout.setSpacing(6)
 
         self.account_info_layout = QVBoxLayout()
         self.account_info_layout.setSpacing(2)
         self.account_name_label = QLabel("No Dropbox account connected")
         self.account_name_label.setStyleSheet("font-size: 12px; font-weight: 700; background-color: transparent;")
         self.account_sub_label = QLabel("Sign in to your Dropbox account")
-        self.account_sub_label.setStyleSheet("font-size: 11px; color: #64748b; background-color: transparent;")
+        self.account_sub_label.setStyleSheet("font-size: 12px; color: #64748b; background-color: transparent;")
         self.account_info_layout.addWidget(self.account_name_label)
         self.account_info_layout.addWidget(self.account_sub_label)
         account_pill_layout.addLayout(self.account_info_layout, 1)
 
-        self.btn_oauth_login = QPushButton("🌐  Log In")
-        self.btn_oauth_login.setProperty("class", "btn-primary")
+        self.btn_oauth_login = QPushButton("Log In")
+        self.btn_oauth_login.setProperty("class", "drawer-save-btn")
         self.btn_oauth_login.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_oauth_login.clicked.connect(self.login_with_dropbox)
         account_pill_layout.addWidget(self.btn_oauth_login)
 
         self.btn_logout = QPushButton("Sign Out")
-        self.btn_logout.setProperty("class", "btn-stop")
+        self.btn_logout.setProperty("class", "drawer-signout-btn")
         self.btn_logout.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_logout.clicked.connect(self.logout_dropbox)
         self.btn_logout.setVisible(False)
@@ -1087,12 +1088,14 @@ class MainWindow(QMainWindow):
 
         # 4. Appearance
         theme_sec = QVBoxLayout()
-        theme_sec.setSpacing(6)
+        theme_sec.setSpacing(8)
         theme_lbl = QLabel("APPEARANCE")
         theme_lbl.setProperty("class", "section-title")
         theme_sec.addWidget(theme_lbl)
 
-        self.btn_theme_toggle = QPushButton("🌙  Switch to Minimal Dark Mode")
+        self.btn_theme_toggle = QPushButton("🌗  Switch Light / Dark Mode")
+        self.btn_theme_toggle.setProperty("class", "drawer-theme-btn")
+        self.btn_theme_toggle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_theme_toggle.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_theme_toggle.clicked.connect(self.toggle_theme)
         theme_sec.addWidget(self.btn_theme_toggle)
@@ -1100,20 +1103,24 @@ class MainWindow(QMainWindow):
 
         # 5. Activity Log & Diagnostics
         log_sec = QVBoxLayout()
-        log_sec.setSpacing(6)
+        log_sec.setSpacing(8)
         log_header = QHBoxLayout()
+        log_header.setSpacing(8)
         log_title = QLabel("ACTIVITY LOG")
         log_title.setProperty("class", "section-title")
         log_header.addWidget(log_title)
         log_header.addStretch()
 
         btn_copy = QPushButton("Copy")
+        btn_copy.setProperty("class", "drawer-log-link")
         btn_copy.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_copy.clicked.connect(self.copy_log)
         btn_clear = QPushButton("Clear")
+        btn_clear.setProperty("class", "drawer-log-link")
         btn_clear.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_clear.clicked.connect(self.clear_log)
         self.btn_toggle_log = QPushButton("Hide Log")
+        self.btn_toggle_log.setProperty("class", "drawer-log-link")
         self.btn_toggle_log.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_toggle_log.clicked.connect(self.toggle_log_visibility)
 
@@ -1123,13 +1130,15 @@ class MainWindow(QMainWindow):
         log_sec.addLayout(log_header)
 
         self.log_filter = QLineEdit()
+        self.log_filter.setProperty("class", "drawer-subtle-input")
         self.log_filter.setPlaceholderText("Filter logs...")
         self.log_filter.textChanged.connect(self.filter_logs)
         log_sec.addWidget(self.log_filter)
 
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(140)
+        self.log_box.setMinimumHeight(105)
+        self.log_box.setMaximumHeight(135)
         log_sec.addWidget(self.log_box)
         drawer_layout.addLayout(log_sec)
 
@@ -1142,9 +1151,10 @@ class MainWindow(QMainWindow):
         drawer_outer.addWidget(drawer_bot_divider)
 
         drawer_footer = QHBoxLayout()
+        drawer_footer.setContentsMargins(0, 2, 0, 0)
         drawer_footer.addStretch()
         btn_save_close = QPushButton("Save && Close")
-        btn_save_close.setProperty("class", "btn-primary")
+        btn_save_close.setProperty("class", "drawer-save-btn")
         btn_save_close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_save_close.clicked.connect(self._save_and_close_settings)
         drawer_footer.addWidget(btn_save_close)
@@ -1624,22 +1634,28 @@ class MainWindow(QMainWindow):
     def update_account_ui(self):
         logged_in = self.is_logged_in()
         if logged_in:
-            display_name = self.current_user_name or "Connected User"
-            email = self.current_user_email or "OAuth Account"
-            self.account_name_label.setText(f"👤 {display_name}")
-            self.account_sub_label.setText(email)
+            display_name = self.current_user_name or ""
+            email = self.current_user_email or ""
+            primary_acct = email or display_name or "Connected Account"
+            self.account_name_label.setText(primary_acct)
+            if display_name and email:
+                self.account_name_label.setToolTip(f"{display_name} <{email}>")
+            else:
+                self.account_name_label.setToolTip(primary_acct)
+            self.account_sub_label.setText("● Connected via PKCE OAuth")
             self.set_auth_badge("● Connected", "connected")
-            self.btn_oauth_login.setText("🔄  Switch")
-            self.btn_oauth_login.setProperty("class", "btn-secondary")
+            self.btn_oauth_login.setText("Switch")
+            self.btn_oauth_login.setProperty("class", "drawer-acct-btn")
             self._repolish(self.btn_oauth_login)
             self.btn_logout.setVisible(True)
             self.login_banner.setVisible(False)
         else:
             self.account_name_label.setText("No Dropbox account connected")
+            self.account_name_label.setToolTip("")
             self.account_sub_label.setText("Sign in to your Dropbox account")
             self.set_auth_badge("○ Not Logged In", "neutral")
-            self.btn_oauth_login.setText("🌐  Log In")
-            self.btn_oauth_login.setProperty("class", "btn-primary")
+            self.btn_oauth_login.setText("Log In")
+            self.btn_oauth_login.setProperty("class", "drawer-save-btn")
             self._repolish(self.btn_oauth_login)
             self.btn_logout.setVisible(False)
             self.login_banner.setVisible(True)

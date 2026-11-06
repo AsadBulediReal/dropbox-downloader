@@ -2,6 +2,10 @@
 UI Stylesheet definitions for Dropbox Downloader GUI (Clean Light & Minimal Dark Themes).
 """
 
+from pathlib import Path
+
+_CHECKMARK_SVG = (Path(__file__).resolve().parent / "checkmark.svg").as_posix()
+
 LIGHT_STYLESHEET = """
 QMainWindow {
     background-color: #f8fafc;
@@ -132,8 +136,121 @@ QFrame.metric-card, QFrame[class="metric-card"] {
     padding: 10px 14px;
 }
 QFrame.settings-drawer, QFrame[class="settings-drawer"] {
+    background-color: #f8fafc;
+    border-left: 1px solid #e2e8f0;
+}
+QLineEdit.drawer-subtle-input, QLineEdit[class="drawer-subtle-input"] {
+    background-color: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #0f172a;
+    padding: 7px 12px;
+    font-size: 12px;
+}
+QLineEdit.drawer-subtle-input:focus, QLineEdit[class="drawer-subtle-input"]:focus {
+    border: 1px solid #0061ff;
+}
+QLineEdit.drawer-subtle-input:disabled, QLineEdit[class="drawer-subtle-input"]:disabled {
+    background-color: #f1f5f9;
+    color: #94a3b8;
+    border: 1px solid #e2e8f0;
+}
+QPushButton.drawer-card-btn, QPushButton[class="drawer-card-btn"] {
     background-color: #ffffff;
-    border-left: 1px solid #cbd5e1;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #0f172a;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+}
+QPushButton.drawer-card-btn:hover, QPushButton[class="drawer-card-btn"]:hover {
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+}
+QPushButton.drawer-card-btn:disabled, QPushButton[class="drawer-card-btn"]:disabled {
+    background-color: #f8fafc;
+    color: #94a3b8;
+    border-color: #e2e8f0;
+}
+QPushButton.drawer-close-btn, QPushButton[class="drawer-close-btn"] {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #0f172a;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 12px;
+}
+QPushButton.drawer-close-btn:hover, QPushButton[class="drawer-close-btn"]:hover {
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+}
+QPushButton.drawer-acct-btn, QPushButton[class="drawer-acct-btn"] {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #0f172a;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 10px;
+}
+QPushButton.drawer-acct-btn:hover, QPushButton[class="drawer-acct-btn"]:hover {
+    background-color: #f8fafc;
+    border-color: #cbd5e1;
+}
+QPushButton.drawer-signout-btn, QPushButton[class="drawer-signout-btn"] {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #ef4444;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 10px;
+}
+QPushButton.drawer-signout-btn:hover, QPushButton[class="drawer-signout-btn"]:hover {
+    background-color: #fef2f2;
+    border-color: #fecaca;
+    color: #dc2626;
+}
+QPushButton.drawer-theme-btn, QPushButton[class="drawer-theme-btn"] {
+    background-color: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    color: #0f172a;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 12px;
+    text-align: left;
+}
+QPushButton.drawer-theme-btn:hover, QPushButton[class="drawer-theme-btn"]:hover {
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+}
+QPushButton.drawer-log-link, QPushButton[class="drawer-log-link"] {
+    background-color: transparent;
+    border: none;
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 4px;
+}
+QPushButton.drawer-log-link:hover, QPushButton[class="drawer-log-link"]:hover {
+    color: #0f172a;
+    text-decoration: underline;
+}
+QPushButton.drawer-save-btn, QPushButton[class="drawer-save-btn"] {
+    background-color: #0061ff;
+    border: 1px solid #0061ff;
+    border-radius: 8px;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 18px;
+}
+QPushButton.drawer-save-btn:hover, QPushButton[class="drawer-save-btn"]:hover {
+    background-color: #0052d9;
+    border-color: #0052d9;
 }
 QLabel.hero-title, QLabel[class="hero-title"] {
     font-size: 23px;
@@ -523,25 +640,25 @@ QHeaderView::section {
     font-weight: 700;
 }
 QPlainTextEdit {
-    background-color: #f8fafc;
+    background-color: #f1f5f9;
     border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    color: #334155;
+    border-radius: 8px;
+    color: #475569;
     font-family: Consolas, "Courier New", monospace;
     font-size: 11px;
-    padding: 8px;
+    padding: 8px 10px;
 }
 QCheckBox {
-    color: #334155;
+    color: #0f172a;
     font-size: 12px;
-    spacing: 8px;
+    spacing: 10px;
 }
 QCheckBox:disabled {
     color: #94a3b8;
 }
 QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
+    width: 15px;
+    height: 15px;
     border: 1px solid #94a3b8;
     border-radius: 4px;
     background-color: #ffffff;
@@ -549,6 +666,12 @@ QCheckBox::indicator {
 QCheckBox::indicator:checked {
     background-color: #0061ff;
     border-color: #0061ff;
+    image: url("__CHECKMARK_SVG__");
+}
+QCheckBox::indicator:checked:disabled {
+    background-color: #93c5fd;
+    border-color: #93c5fd;
+    image: url("__CHECKMARK_SVG__");
 }
 QScrollBar:vertical {
     border: none;
@@ -702,6 +825,119 @@ QFrame.metric-card, QFrame[class="metric-card"] {
 QFrame.settings-drawer, QFrame[class="settings-drawer"] {
     background-color: #0f172a;
     border-left: 1px solid #334155;
+}
+QLineEdit.drawer-subtle-input, QLineEdit[class="drawer-subtle-input"] {
+    background-color: #0b1120;
+    border: 1px solid #1e293b;
+    border-radius: 8px;
+    color: #f8fafc;
+    padding: 7px 12px;
+    font-size: 12px;
+}
+QLineEdit.drawer-subtle-input:focus, QLineEdit[class="drawer-subtle-input"]:focus {
+    border: 1px solid #38bdf8;
+}
+QLineEdit.drawer-subtle-input:disabled, QLineEdit[class="drawer-subtle-input"]:disabled {
+    background-color: #080d18;
+    color: #475569;
+    border: 1px solid #1e293b;
+}
+QPushButton.drawer-card-btn, QPushButton[class="drawer-card-btn"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #f8fafc;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 12px;
+}
+QPushButton.drawer-card-btn:hover, QPushButton[class="drawer-card-btn"]:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+}
+QPushButton.drawer-card-btn:disabled, QPushButton[class="drawer-card-btn"]:disabled {
+    background-color: #0d131f;
+    color: #475569;
+    border-color: #192436;
+}
+QPushButton.drawer-close-btn, QPushButton[class="drawer-close-btn"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #f8fafc;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 12px;
+}
+QPushButton.drawer-close-btn:hover, QPushButton[class="drawer-close-btn"]:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+}
+QPushButton.drawer-acct-btn, QPushButton[class="drawer-acct-btn"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #f8fafc;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 10px;
+}
+QPushButton.drawer-acct-btn:hover, QPushButton[class="drawer-acct-btn"]:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+}
+QPushButton.drawer-signout-btn, QPushButton[class="drawer-signout-btn"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #f87171;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 10px;
+}
+QPushButton.drawer-signout-btn:hover, QPushButton[class="drawer-signout-btn"]:hover {
+    background-color: #2d1215;
+    border-color: #7f1d1d;
+    color: #fca5a5;
+}
+QPushButton.drawer-theme-btn, QPushButton[class="drawer-theme-btn"] {
+    background-color: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #f8fafc;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 12px;
+    text-align: left;
+}
+QPushButton.drawer-theme-btn:hover, QPushButton[class="drawer-theme-btn"]:hover {
+    background-color: #2b3952;
+    border-color: #475569;
+}
+QPushButton.drawer-log-link, QPushButton[class="drawer-log-link"] {
+    background-color: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 4px;
+}
+QPushButton.drawer-log-link:hover, QPushButton[class="drawer-log-link"]:hover {
+    color: #f8fafc;
+    text-decoration: underline;
+}
+QPushButton.drawer-save-btn, QPushButton[class="drawer-save-btn"] {
+    background-color: #0ea5e9;
+    border: 1px solid #38bdf8;
+    border-radius: 8px;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 18px;
+}
+QPushButton.drawer-save-btn:hover, QPushButton[class="drawer-save-btn"]:hover {
+    background-color: #0284c7;
+    border-color: #7dd3fc;
 }
 QLabel.hero-title, QLabel[class="hero-title"] {
     font-size: 23px;
@@ -1093,32 +1329,38 @@ QHeaderView::section {
     font-weight: 700;
 }
 QPlainTextEdit {
-    background-color: #060912;
+    background-color: #0b1120;
     border: 1px solid #1e293b;
-    border-radius: 10px;
-    color: #cbd5e1;
+    border-radius: 8px;
+    color: #94a3b8;
     font-family: Consolas, "Courier New", monospace;
     font-size: 11px;
-    padding: 8px;
+    padding: 8px 10px;
 }
 QCheckBox {
-    color: #cbd5e1;
+    color: #f8fafc;
     font-size: 12px;
-    spacing: 8px;
+    spacing: 10px;
 }
 QCheckBox:disabled {
     color: #475569;
 }
 QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: 1px solid #334155;
+    width: 15px;
+    height: 15px;
+    border: 1px solid #475569;
     border-radius: 4px;
     background-color: #0b1120;
 }
 QCheckBox::indicator:checked {
     background-color: #0ea5e9;
     border-color: #38bdf8;
+    image: url("__CHECKMARK_SVG__");
+}
+QCheckBox::indicator:checked:disabled {
+    background-color: #1e3a5f;
+    border-color: #1e3a5f;
+    image: url("__CHECKMARK_SVG__");
 }
 QScrollBar:vertical {
     border: none;
@@ -1138,6 +1380,10 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
 }
 """
+
+
+LIGHT_STYLESHEET = LIGHT_STYLESHEET.replace("__CHECKMARK_SVG__", _CHECKMARK_SVG)
+DARK_STYLESHEET = DARK_STYLESHEET.replace("__CHECKMARK_SVG__", _CHECKMARK_SVG)
 
 
 def get_theme_stylesheet(theme: str = "light") -> str:
